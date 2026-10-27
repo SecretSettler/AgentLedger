@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentledger"
+dynamic = ["version"]
+description = "Modular, reviewable, versioned reports for AI agents: comment in the browser, let the agent answer and revise."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+agentledger = "agentledger.cli:main"
+
+[tool.setuptools]
+packages = ["agentledger"]
+
+[tool.setuptools.package-data]
+agentledger = ["assets/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agentledger.__version__" }

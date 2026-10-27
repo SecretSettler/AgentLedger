@@ -1,0 +1,4 @@
+id,reply_to,report,version,module,kind,quote,prefix,suffix,body,author,role,status,created,updated,resolved_in
+c_demo1,,demo/benchmark,1,results,question,Harness out tok,"| Task | ",| Recorded out tok |,"look at this column, why the harness out token is larger than the original? provide detail analysis.",alice,human,open,2026-10-19T01:44:00Z,2026-10-19T01:44:00Z,
+c_demo2,,demo/benchmark,1,limits,issue,Token counts for the recorded agent come from the paper's logs,2. ,", not from our tokenizer.",Then the two columns are not comparable. Re-tokenize the paper's logs with our tokenizer.,bob,human,open,2026-10-19T02:10:00Z,2026-10-19T02:10:00Z,
+c_demo3,,demo/benchmark,1,compile-vs-patch,suggestion,compile time is already under 2% of wall time,"but ",.,Show the measurement behind this number.,alice,human,open,2026-10-19T02:30:00Z,2026-10-19T02:30:00Z,
