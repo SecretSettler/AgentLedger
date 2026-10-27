@@ -22,6 +22,7 @@ from .markdown import render as render_markdown
 from .modules import Module, split_modules
 from .sanitize import sanitize
 from .store import Project, Report, Store, Version, write_json, write_text
+from .traces import human_size
 
 ASSETS = Path(__file__).parent / "assets"
 
@@ -326,6 +327,14 @@ class Builder:
                         f'{" · " + esc(x.meta.get("author")) if x.meta.get("author") else ""}'
                         f'{"<div>" + inline_md(desc) + "</div>" if desc else ""}</li>')
         foot.append("</ol></div>")
+        traces = [(x, t) for x in report.versions if x.number <= v.number for t in x.meta.get("traces", [])]
+        if traces:
+            foot.append('<div class="al-foot-block"><div class="al-foot-h">Traces</div><ul class="al-traces">')
+            for x, t in traces:
+                name = t["path"].split("/", 1)[-1]
+                foot.append(f'<li><a href="{esc(href(x.path / t["path"], start))}" download>{esc(name)}</a> '
+                            f'<span class="al-muted">v{x.number} · {human_size(t.get("bytes", 0))}</span></li>')
+            foot.append("</ul></div>")
         foot.append(f'<div class="al-foot-src">Source: <code>{esc(self.store.repo_path(v.source))}</code> · '
                     f'comments: <code>{esc(self.store.repo_path(v.comments_path))}</code></div>')
         foot.append("</footer>")

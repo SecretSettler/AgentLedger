@@ -180,15 +180,21 @@ mark.al-hl.is-draft { background: var(--al-accent-soft); border-bottom-color: va
 }
 .al-gutter.is-resolved { background: var(--al-surface-3); color: var(--al-resolved); }
 .al-gutter:hover { transform: scale(1.08); }
-.al-selbtn {
+.al-selbar {
   position: absolute; z-index: 60;
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 34px; padding: 0 14px; border: 0; border-radius: 8px;
-  background: var(--al-ink); color: var(--al-bg);
-  font-family: var(--al-sans); font-size: 14px; font-weight: 600;
-  box-shadow: var(--al-shadow); cursor: pointer;
+  display: inline-flex; border-radius: 8px; overflow: hidden;
+  background: var(--al-ink); box-shadow: var(--al-shadow);
 }
+.al-selbtn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 34px; padding: 0 14px; border: 0;
+  background: transparent; color: var(--al-bg);
+  font-family: var(--al-sans); font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.al-selbtn:hover { background: color-mix(in srgb, var(--al-bg) 14%, transparent); }
+.al-selbtn + .al-selbtn { border-left: 1px solid color-mix(in srgb, var(--al-bg) 22%, transparent); }
 .al-selbtn svg { width: 15px; height: 15px; }
+.al-selbtn.is-ask svg { color: var(--al-hl-strong); }
 
 /* Footer */
 .al-doc-foot { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--al-line); font-family: var(--al-sans); font-size: 14px; }
@@ -209,6 +215,8 @@ mark.al-hl.is-draft { background: var(--al-accent-soft); border-bottom-color: va
 .al-history .al-hv { font-weight: 700; color: var(--al-ink); }
 .al-history .is-current .al-hv::after { content: " (viewing)"; font-weight: 400; color: var(--al-muted); }
 .al-foot-src { color: var(--al-muted); font-size: 12.5px; }
+.al-traces { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.al-traces a { font-family: var(--al-mono); font-size: 13px; }
 .al-foot-src code { font-size: 12px; }
 
 /* Rail: the document as a vertical timeline with a draggable knob */
@@ -389,11 +397,29 @@ mark.al-hl.is-draft { background: var(--al-accent-soft); border-bottom-color: va
 .al-msg.is-agent { border-left-color: var(--al-agent); }
 .al-msg-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--al-muted); }
 .al-msg-head b { font-size: 13px; color: var(--al-ink); }
-.al-msg-body { margin-top: 3px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+.al-msg-body { margin-top: 3px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.al-msg-body code { font-family: var(--al-mono); font-size: 12px; background: var(--al-surface-2); border-radius: 4px; padding: 0 3px; }
 .al-thread-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
 .al-thread-actions .al-btn { height: 26px; padding: 0 8px; font-size: 12px; }
 .al-thread-actions .al-btn svg { width: 13px; height: 13px; }
 .al-replybox { display: grid; gap: 6px; margin-top: 8px; }
+.al-asking {
+  display: grid; gap: 3px; margin-top: 10px; padding: 9px 10px;
+  border-radius: 8px; background: var(--al-agent-soft); font-size: 12.5px; color: var(--al-ink-2);
+}
+.al-asking-h { display: flex; align-items: center; gap: 8px; color: var(--al-agent); }
+.al-asking-h .al-muted { margin-left: auto; }
+.al-asking-step { font-family: var(--al-mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-asking.is-error { background: var(--al-removed-soft); }
+.al-asking.is-error b { color: var(--al-removed); }
+.al-asking.is-error .al-asking-step { white-space: pre-wrap; }
+.al-asking .al-btn { justify-self: start; margin-top: 4px; }
+.al-spinner {
+  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  border: 2px solid color-mix(in srgb, var(--al-agent) 30%, transparent); border-top-color: var(--al-agent);
+  animation: al-spin .8s linear infinite;
+}
+@keyframes al-spin { to { transform: rotate(360deg); } }
 .al-replybox .al-textarea { min-height: 60px; }
 
 /* Map overlay */
@@ -441,7 +467,7 @@ body.al-panel-open .al-pad { right: calc(var(--al-panel-w) + 20px); }
   .al-pad-body { width: calc(100vw - 28px); }
 }
 @media print {
-  .al-topbar, .al-rail, .al-pad, .al-panel, .al-gutter, .al-selbtn, .al-mod-actions, .al-banner { display: none !important; }
+  .al-topbar, .al-rail, .al-pad, .al-panel, .al-gutter, .al-selbar, .al-mod-actions, .al-banner { display: none !important; }
   .al-main { padding: 0; margin: 0 !important; }
   .al-module.is-collapsed > * { display: revert !important; }
   mark.al-hl { background: none; border: 0; }

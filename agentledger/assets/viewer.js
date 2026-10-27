@@ -9,7 +9,7 @@
   const V = D.version.n;
   const comments = new AL.Comments(D.store.key, D.report.id);
   const sync = new AL.Sync(D.store);
-  const ui = { panel: false, filter: 'open', scope: 'all', focus: null, compose: null, kind: 'question', anchors: new Map(), active: 0 };
+  const ui = { panel: false, filter: 'open', scope: 'all', focus: null, compose: null, kind: 'question', anchors: new Map(), active: 0, asking: new Map() };
   let reviewer = AL.storage.get('agentledger:name', '');
 
   const moduleById = (id) => modules.find((s) => s.dataset.module === id);
@@ -244,11 +244,10 @@
   /* ======================================================= selection */
   let selBtn;
   function setupSelection() {
-    selBtn = h('button.al-selbtn.al-noanchor', {
-      type: 'button', hidden: true,
-      onMousedown: (e) => e.preventDefault(),
-      onClick: () => { if (ui.pendingSel) startCompose(ui.pendingSel); hideSel(); },
-    }, AL.iconEl('comment'), 'Comment');
+    const pick = (mode) => () => { if (ui.pendingSel) startCompose(ui.pendingSel, mode); hideSel(); };
+    selBtn = h('div.al-selbar.al-noanchor', { hidden: true, onMousedown: (e) => e.preventDefault() },
+      h('button.al-selbtn', { type: 'button', title: 'Comment on the selection (c)', onClick: pick('comment') }, AL.iconEl('comment'), 'Comment'),
+      h('button.al-selbtn.is-ask', { type: 'button', title: 'Ask the agent about the selection (a)', onClick: pick('ask') }, AL.iconEl('spark'), 'Ask'));
     document.body.appendChild(selBtn);
     const later = (ms) => () => setTimeout(onSelection, ms);
     document.addEventListener('mouseup', later(0));
@@ -405,10 +404,11 @@
       ui.filter === 'open' ? 'No open threads. Select any text in the report and press ' : 'Nothing here yet. Select text and press ',
       h('strong', null, 'Comment'), ', or use the ', AL.iconEl('comment'), ' button on a module.')]));
     if (ui.focus) { const el = threadsBox.querySelector(`[data-cid="${CSS.escape(ui.focus)}"]`); if (el) el.classList.add('is-focus'); }
+
   }
 
   function msgEl(m, isReply) {
-    const body = h('div.al-msg-body', null, m.body);
+    const body = h('div.al-msg-body', { html: AL.mdLite(m.body) });
     return h('div.al-msg' + (isReply ? '.is-reply' : '') + (m.role === 'agent' ? '.is-agent' : ''), { dataset: { mid: m.id } },
       h('div.al-msg-head', null,
         h('b', null, m.author || 'anonymous'),
@@ -433,9 +433,11 @@
         h('span.al-thread-mod', { title: mod ? mod.title : r.module }, mod ? mod.title : r.module || '')),
       r.quote ? h('blockquote.al-quote', { title: 'Show in report', onClick: () => go(r.id) }, r.quote) : null,
       msgEl(r, false), ...t.replies.map((x) => msgEl(x, true)),
+      askingEl(r.id),
       h('div.al-thread-actions', null,
         btn('go', 'go', () => go(r.id), '.is-small', 'Scroll to the commented text'),
         btn('reply', 'reply', () => openReply(replyBox, r), '.is-small'),
+        ui.asking.has(r.id) ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
         r.status === 'open'
           ? btn('check', 'resolve', () => setStatus(r, 'resolved'), '.is-small')
           : btn('reopen', 'reopen', () => setStatus(r, 'open'), '.is-small'),
@@ -458,14 +460,18 @@
     if (!box.hidden) { box.hidden = true; return; }
     const ta = h('textarea.al-textarea', { placeholder: 'Reply… (Ctrl/⌘+Enter to send)' });
     const send = () => {
-      if (needName() || !ta.value.trim()) return;
+      if (needName() || !ta.value.trim()) return false;
       const ts = AL.nowIso();
       comments.put({ id: AL.newId(), reply_to: root.id, report: root.report, version: root.version, module: root.module,
         body: ta.value.trim(), author: reviewer, role: 'human', status: '', created: ts, updated: ts });
       ui.focus = root.id;
+      return true;
     };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send(); if (e.key === 'Escape') box.hidden = true; });
-    box.replaceChildren(ta, h('div.al-composer-row', null, btn(null, 'Cancel', () => { box.hidden = true; }, '.is-small'), btn('reply', 'Reply', send, '.is-small.is-primary')));
+    box.replaceChildren(ta, h('div.al-composer-row', null, btn(null, 'Cancel', () => { box.hidden = true; }, '.is-small'),
+      btn('reply', 'Reply', send, '.is-small'),
+      btn('spark', 'Reply & ask', () => { if (!sync.askBackend) return askUnavailable(); if (send()) askAgent(root.id); }, '.is-small.is-primary',
+        `Send your reply and have ${askName()} answer it`)));
     box.hidden = false;
     ta.focus();
   }
@@ -497,10 +503,86 @@
     }]);
   }
 
+  /* ============================================================= ask */
+  const askName = () => sync.askBackend || 'the agent';
+  function askUnavailable() {
+    AL.modal('Ask the agent', h('div', null,
+      h('p', null, 'Ask runs Claude Code or Codex on the machine that holds the store, read-only, with the report, its traces and the repository it describes as context. The answer is saved as a reply in the thread.'),
+      h('p', null, 'Open this page through ', h('code', null, 'agentledger serve'), ' on that machine, with ', h('code', null, 'claude'), ' or ',
+        h('code', null, 'codex'), ' installed. For a remote host: ', h('code', null, 'ssh -L 8765:localhost:8765 host'), ', then http://localhost:8765.')), []);
+  }
+  async function askAgent(threadId) {
+    if (!sync.askBackend) return askUnavailable();
+    const cur = ui.asking.get(threadId);
+    if (cur && cur.status === 'running') return;
+    const rows = comments.dirty();
+    ui.asking.set(threadId, { status: 'running', progress: [`Sending to ${askName()}…`] });
+    ui.focus = threadId;
+    ui.reveal = threadId;
+    renderPanel();
+    try {
+      const r = await sync.ask(rows, threadId);
+      ui.asking.get(threadId).job = r.job;
+      comments.markSynced(rows);
+      comments.addRemote((r.rows || []).filter((x) => x.report === D.report.id));
+      pollAsk(threadId);
+    } catch (e) {
+      ui.asking.set(threadId, { status: 'error', error: e.message, progress: [] });
+      renderPanel();
+    }
+  }
+  function pollAsk(threadId) {
+    const entry = ui.asking.get(threadId);
+    if (!entry || !entry.job) return;
+    setTimeout(async () => {
+      let st;
+      try { st = await sync.askStatus(entry.job); } catch (e) {
+        entry.status = 'error'; entry.error = e.message;
+        return renderPanel();
+      }
+      entry.progress = st.progress || [];
+      entry.elapsed = st.elapsed;
+      if (st.status === 'done') {
+        ui.asking.delete(threadId);
+        ui.focus = threadId;
+        ui.reveal = threadId;
+        if (st.reply) comments.addRemote([st.reply]);
+        AL.toast(`${askName()} answered`);
+        return;
+      }
+      if (st.status === 'error') {
+        entry.status = 'error'; entry.error = st.error;
+        return renderPanel();
+      }
+      updateAsking(threadId);
+      pollAsk(threadId);
+    }, 1200);
+  }
+  function askingEl(threadId) {
+    const e = ui.asking.get(threadId);
+    if (!e) return null;
+    if (e.status === 'error') {
+      return h('div.al-asking.is-error', null, h('b', null, `${askName()} could not answer`), h('div.al-asking-step', null, e.error),
+        btn('reopen', 'try again', () => { ui.asking.delete(threadId); askAgent(threadId); }, '.is-small'));
+    }
+    return h('div.al-asking', { 'aria-live': 'polite' },
+      h('div.al-asking-h', null, h('span.al-spinner'), h('b', null, `${askName()} is working`), e.elapsed ? h('span.al-muted', null, `${e.elapsed}s`) : null),
+      ...(e.progress || []).slice(-3).map((step) => h('div.al-asking-step', null, step)));
+  }
+  function updateAsking(threadId) {
+    const card = threadsBox.querySelector(`.al-thread[data-cid="${CSS.escape(threadId)}"]`);
+    const fresh = askingEl(threadId);
+    if (!card || !fresh) return;
+    const old = card.querySelector('.al-asking');
+    if (old) old.replaceWith(fresh);
+    else card.querySelector('.al-thread-actions').before(fresh);
+  }
+
   /* ======================================================== composer */
-  function startCompose(anchor) {
+  function startCompose(anchor, mode) {
+    if (mode === 'ask' && !sync.askBackend) return askUnavailable();
     openPanel();
-    ui.compose = Object.assign({}, anchor);
+    ui.compose = Object.assign({}, anchor, { mode: mode || 'comment' });
     renderComposer();
     paintDraft();
     const ta = composerBox.querySelector('textarea');
@@ -515,7 +597,12 @@
     if (composerBox.dataset.for === JSON.stringify(c)) return;
     composerBox.dataset.for = JSON.stringify(c);
     const mod = modInfo.get(c.module);
-    const ta = h('textarea.al-textarea', { placeholder: 'Ask the agent to verify, explain or change something…', 'aria-label': 'Comment' });
+    const asking = c.mode === 'ask';
+    const ta = h('textarea.al-textarea', {
+      placeholder: asking ? `What do you want to know? ${askName()} answers from the report, its traces and the repo.`
+        : 'Ask the agent to verify, explain or change something…',
+      'aria-label': asking ? 'Question' : 'Comment',
+    });
     const kinds = h('div.al-kinds', { role: 'radiogroup', 'aria-label': 'Kind' }, ...AL.KINDS.map((k) => h('button.al-kind' + (ui.kind === k ? '.is-on' : ''), {
       type: 'button', role: 'radio', 'aria-checked': String(ui.kind === k),
       onClick: (e) => { ui.kind = k; $$('.al-kind', kinds).forEach((b) => { b.classList.toggle('is-on', b === e.currentTarget); b.setAttribute('aria-checked', String(b === e.currentTarget)); }); },
@@ -525,7 +612,7 @@
       const body = ta.value.trim();
       if (!body) { ta.focus(); return; }
       const ts = AL.nowIso();
-      const row = { id: AL.newId(), reply_to: '', report: D.report.id, version: String(V), module: c.module, kind: ui.kind,
+      const row = { id: AL.newId(), reply_to: '', report: D.report.id, version: String(V), module: c.module, kind: asking ? 'question' : ui.kind,
         quote: c.quote || '', prefix: c.prefix || '', suffix: c.suffix || '', body, author: reviewer, role: 'human',
         status: 'open', created: ts, updated: ts };
       ui.compose = null;
@@ -533,15 +620,18 @@
       if (ui.filter === 'closed') ui.filter = 'open';
       composerBox.dataset.for = '';
       comments.put(row);
+      if (asking) return askAgent(row.id);
       AL.toast(sync.mode === 'none' ? 'Comment kept in this browser — export the CSV when done' : 'Comment added — save when ready');
     };
     const cancel = () => { ui.compose = null; composerBox.dataset.for = ''; unwrapMarks('mark.al-hl.is-draft'); renderComposer(); };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save(); if (e.key === 'Escape') { e.stopPropagation(); cancel(); } });
     composerBox.replaceChildren(
-      h('div.al-composer-h', null, c.quote ? 'New comment on selection' : `New comment on “${mod ? mod.title : c.module}”`),
+      h('div.al-composer-h', null, asking ? `Ask ${askName()} about ${c.quote ? 'this selection' : `“${mod ? mod.title : c.module}”`}`
+        : c.quote ? 'New comment on selection' : `New comment on “${mod ? mod.title : c.module}”`),
       c.quote ? h('blockquote.al-quote', null, c.quote) : null,
-      kinds, ta,
-      h('div.al-composer-row', null, h('span.al-muted', null, 'Ctrl/⌘ + Enter'), btn(null, 'Cancel', cancel, '.is-small'), btn('comment', 'Comment', save, '.is-small.is-primary')));
+      asking ? null : kinds, ta,
+      h('div.al-composer-row', null, h('span.al-muted', null, 'Ctrl/⌘ + Enter'), btn(null, 'Cancel', cancel, '.is-small'),
+        asking ? btn('spark', 'Ask', save, '.is-small.is-primary') : btn('comment', 'Comment', save, '.is-small.is-primary')));
   }
 
   /* =================================================== import/export */
@@ -917,7 +1007,7 @@
 
   /* ============================================================ help */
   function showHelp() {
-    const keys = [['j / k', 'Next / previous module'], ['[ / ]', 'Previous / next version'], ['c', 'Comment on the selection (or the current module)'],
+    const keys = [['j / k', 'Next / previous module'], ['[ / ]', 'Previous / next version'], ['c', 'Comment on the selection (or the current module)'], ['a', 'Ask the agent about the selection'],
       ['p', 'Show / hide review comments'], ['m', 'Project map'], ['n', 'Show / hide the navigator pad'], ['d', 'Dashboard'], ['Esc', 'Close panels'], ['?', 'This help']];
     AL.modal('Keyboard shortcuts', h('div', null,
       h('div.al-help-grid', null, ...keys.flatMap(([k, d]) => [h('span', null, ...k.split(' / ').flatMap((x, i) => [i ? ' / ' : '', h('kbd.al-kbd', null, x)])), h('span', null, d)])),
@@ -942,6 +1032,7 @@
       else if (k === '[') { const v = versionOf(V - 1); if (v) location.href = versionHref(v); }
       else if (k === ']') { const v = versionOf(V + 1); if (v) location.href = versionHref(v); }
       else if (k === 'c') { const cur = currentSelection(); startCompose(cur ? cur.anchor : { module: currentModuleId() }); hideSel(); }
+      else if (k === 'a') { const cur = currentSelection(); startCompose(cur ? cur.anchor : { module: currentModuleId() }, 'ask'); hideSel(); }
       else if (k === 'p') togglePanel();
       else if (k === 'm') openMap();
       else if (k === 'n') togglePad();
@@ -961,6 +1052,12 @@
       renderQueued = false;
       paintHighlights();
       renderPanel();
+      // Scroll the panel to a thread only once highlights are painted: list order depends on them.
+      if (ui.reveal && ui.panel) {
+        const el = threadsBox.querySelector(`.al-thread[data-cid="${CSS.escape(ui.reveal)}"]`);
+        if (el) el.scrollIntoView({ block: 'nearest' });
+        ui.reveal = null;
+      }
       const perModule = new Map();
       for (const { root } of AL.threads(reportRows())) {
         if (root.status !== 'open') continue;

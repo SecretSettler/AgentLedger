@@ -26,8 +26,9 @@ If `agentledger` is missing or says no store is configured, tell the user to run
    - evidence next to every claim: numbers, tables, commands, file paths, commit hashes;
    - mark modules a human should check: `## Results {#results status=needs-review}`;
    - images or data files: save them next to the draft and pass each with `--asset <path>`.
-4. Publish from the repository the report is about, so it records that repo and commit:
-   `agentledger publish <id> <draft> --author <claude-code|codex> --summary "<one line>"`
+4. Publish from the repository the report is about, so it records that repo and commit, and attach the trace of
+   this session plus any logs the findings rest on (reviewers ask questions that are answered from them):
+   `agentledger publish <id> <draft> --author <claude-code|codex> --summary "<one line>" --trace auto [--trace <log>]`
    (for a revision add `--changes "<what changed>"`).
 5. `agentledger sync -m "<id> vN: <short title>"` commits and pushes the store.
 6. Answer in chat with a short summary of the findings, the version, and the `github:` link publish printed.
