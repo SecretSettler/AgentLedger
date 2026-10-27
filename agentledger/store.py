@@ -205,7 +205,8 @@ def find_root(start: Optional[Path] = None) -> Path:
     for p in [here, *here.parents]:
         if (p / CONFIG_NAME).exists():
             return p
-    raise LedgerError(f"no {CONFIG_NAME} found here or above; run `agentledger init` or set AGENTLEDGER_STORE")
+    raise LedgerError(f"no store configured: no {CONFIG_NAME} here or above and AGENTLEDGER_STORE is unset; "
+                      "run `agentledger setup <path-to-store>` once (or `agentledger init` to create a store)")
 
 
 class Store:
@@ -331,6 +332,7 @@ class Store:
         tags: list[str] | None = None,
         allow_scripts: bool = False,
         carry_assets: bool = True,
+        context: dict | None = None,
     ) -> Version:
         source = Path(source)
         if not source.exists():
@@ -399,6 +401,8 @@ class Store:
             "resolves": list(resolves),
             "source": src_name,
         }
+        if context:
+            meta["context"] = context
         if allow_scripts:
             meta["allow_scripts"] = True
         write_json(vdir / "meta.json", meta)

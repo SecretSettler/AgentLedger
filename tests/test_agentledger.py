@@ -1,7 +1,9 @@
 import contextlib
 import io
 import json
+import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -181,6 +183,80 @@ class CliTests(unittest.TestCase):
         self.assertTrue(draft.read_text().startswith("---"))
         code, out = run("--store", s, "tree")
         self.assertIn("benchmark", out)
+
+
+def sh(cwd, *argv):
+    subprocess.run(argv, cwd=cwd, check=True, capture_output=True)
+
+
+class AutomationTests(unittest.TestCase):
+    """setup (user-level Claude Code install), sync (git round trip), and recorded provenance."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.env = {k: os.environ.get(k) for k in ("AGENTLEDGER_STORE", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")}
+        os.environ.pop("AGENTLEDGER_STORE", None)
+        for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+            os.environ[k] = "t"
+        for k in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+            os.environ[k] = "t@example.com"
+
+    def tearDown(self):
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp)
+
+    def test_setup_is_idempotent_and_keeps_existing_settings(self):
+        store = init_store(self.tmp / "store", name="S")
+        claude = self.tmp / "claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text(json.dumps({"model": "x", "permissions": {"allow": ["Bash(ls:*)"]}}))
+        (claude / "CLAUDE.md").write_text("# Mine\n\nKeep this.\n")
+        for _ in range(2):
+            self.assertEqual(run("setup", str(store), "--claude-dir", str(claude))[0], 0)
+        settings = json.loads((claude / "settings.json").read_text())
+        self.assertEqual(settings["model"], "x")
+        self.assertEqual(settings["env"]["AGENTLEDGER_STORE"], str(store))
+        self.assertEqual(settings["permissions"]["allow"], ["Bash(ls:*)", "Bash(agentledger:*)"])
+        md = (claude / "CLAUDE.md").read_text()
+        self.assertTrue(md.startswith("# Mine"))
+        self.assertEqual(md.count("agentledger:begin"), 1)
+        skill = (claude / "skills/agentledger/SKILL.md").read_text()
+        self.assertTrue(skill.startswith("---\nname: agentledger\n"))
+
+    def test_publish_records_context_and_sync_pushes(self):
+        remote = self.tmp / "remote.git"
+        sh(self.tmp, "git", "init", "-q", "--bare", str(remote))
+        store = init_store(self.tmp / "store", name="S")
+        sh(store, "git", "init", "-q", "-b", "main")
+        sh(store, "git", "remote", "add", "origin", str(remote))
+        work = self.tmp / "work-repo"
+        work.mkdir()
+        sh(work, "git", "init", "-q")
+        (work / "a.txt").write_text("a")
+        sh(work, "git", "add", "-A")
+        sh(work, "git", "commit", "-qm", "init")
+        os.environ["AGENTLEDGER_STORE"] = str(store)
+        cwd = os.getcwd()
+        try:
+            os.chdir(work)
+            code, out = run("publish", "work-repo/findings", str(DEMO / "dna-primer.md"))
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 0, out)
+        meta = json.loads((store / "projects/work-repo/findings/v001/meta.json").read_text())
+        self.assertEqual(meta["context"]["repo"], "work-repo")
+        self.assertFalse(meta["context"]["dirty"])
+        self.assertIn("work-repo@", (store / "projects/work-repo/findings/v001/index.html").read_text())
+        code, out = run("sync", "-m", "first report")
+        self.assertEqual(code, 0, out)
+        log = subprocess.run(["git", "--git-dir", str(remote), "log", "--oneline", "main"], capture_output=True, text=True).stdout
+        self.assertIn("first report", log)
+        code, out = run("sync")
+        self.assertIn("nothing to commit", out)
 
 
 class ServerTests(unittest.TestCase):

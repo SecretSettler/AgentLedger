@@ -32,6 +32,31 @@ agentledger serve --open        # dashboard at http://localhost:8765/, comments 
 
 To try the UI on sample data: `sh examples/build-demo.sh` (the numbers in it are made up).
 
+## Use it for every report, from any repo
+
+Run this once on the machine where Claude Code runs:
+
+```sh
+git clone git@github.com:OWNER/my-ledger.git ~/my-ledger
+agentledger setup ~/my-ledger
+```
+
+`setup` writes to `~/.claude` (use `--claude-dir` for another location):
+
+- `skills/agentledger/SKILL.md`: the workflow for writing reports and handling review comments;
+- `settings.json`: `env.AGENTLEDGER_STORE` (so the CLI finds the store from any directory), `env.AGENTLEDGER_AUTHOR=claude-code`,
+  and a `Bash(agentledger:*)` permission so the commands run without prompts (`--no-permissions` to skip);
+- `CLAUDE.md`: a short block, between `agentledger:begin/end` markers, telling Claude to publish every report there.
+
+Re-running it updates those pieces in place and leaves the rest of your settings alone. After a restart, asking Claude Code in any
+repository for a report, an analysis or a write-up makes it:
+
+1. `agentledger sync` (pull the store), pick `<repo-name>/<topic>`, reusing the report if the topic already exists;
+2. write the draft, `agentledger publish` it (which records the repo, branch and commit it describes, shown on the page);
+3. `agentledger sync -m "..."` to commit and push, then reply with a summary and the link.
+
+Ask it to "handle the review comments on <report>" and it pulls, answers each thread, publishes a revision and pushes.
+
 ## Store layout
 
 The store is a plain folder, usually its own git repository. The CLI is the only thing that writes into `projects/`, so the hierarchy stays the same everywhere:
@@ -90,7 +115,8 @@ agentledger publish oneswe/harness-vs-paper draft.md --changes "Explained the to
 git add -A && git commit -m "harness-vs-paper v2" && git push
 ```
 
-`skills/agentledger/SKILL.md` is a Claude Code skill that teaches an agent this workflow; copy it into the store repo (`.claude/skills/agentledger/`).
+`agentledger sync [-m message]` pulls, rebuilds, commits and pushes the store in one step. The Claude Code skill that teaches
+this workflow ships in the package (`agentledger/assets/SKILL.md`) and is installed by `agentledger setup`.
 
 ## Writing reports
 
@@ -107,9 +133,11 @@ git add -A && git commit -m "harness-vs-paper v2" && git push
 | Command | |
 |---|---|
 | `init [dir] --name --repo --branch` | Create a store |
-| `publish <id> <file\|folder>` | New report or new version. `--title --summary --about --author --changes --resolves --asset --tag --allow-scripts --no-carry` |
+| `publish <id> <file\|folder>` | New report or new version; records the git repo and commit it ran in. `--title --summary --about --author --changes --resolves --asset --tag --allow-scripts --no-carry --no-context` |
 | `build` | Regenerate every page, the dashboard and `manifest.json` (writes only what changed) |
 | `serve [--port --host --allow-host --open]` | Local server; the browser can save comments into the store |
+| `sync [-m msg] [--no-pull --no-push]` | Pull, rebuild, commit and push the store |
+| `setup <store> [--claude-dir --no-permissions --no-claude-md]` | Make Claude Code publish every report into this store |
 | `tree`, `check` | Show the hierarchy; validate the layout |
 | `draft <id> [-o file] [--version N]` | Copy a version's source to a working file |
 | `template` | Print a report skeleton |

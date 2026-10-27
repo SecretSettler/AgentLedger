@@ -267,6 +267,12 @@ class Builder:
                 f'<time datetime="{esc(v.created)}">{esc(v.created[:10])}</time>']
         if meta.get("author"):
             info.append(f"by {esc(meta['author'])}")
+        ctx = meta.get("context") or {}
+        if ctx.get("commit"):
+            repo = re.sub(r"\.git$", "", (ctx.get("repo") or "").rstrip("/")).rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+            label = f"{repo}@{ctx['commit']}" + ("+dirty" if ctx.get("dirty") else "")
+            tip = f"{ctx.get('repo', '')} · branch {ctx.get('branch', '')} · commit {ctx['commit']}"
+            info.append(f'<span title="{esc(tip)}">from <code>{esc(label)}</code></span>')
         info.append(f"{len(cur.modules)} module{'s' if len(cur.modules) != 1 else ''}")
         info.append(f"{words:,} words")
         parts.append('<div class="al-docmeta">' + ' <span class="al-dot">·</span> '.join(info) + "</div>")

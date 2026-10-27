@@ -100,6 +100,34 @@ def cmd_init(args) -> int:
     return 0
 
 
+def git(cwd: Path, *argv: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["git", "-C", str(cwd), *argv], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return subprocess.CompletedProcess(["git", *argv], 1, "", str(exc))
+
+
+def git_context(cwd: Path, store: Store) -> dict | None:
+    """Which repository and commit a report was written about (the directory publish ran in)."""
+    top = git(cwd, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return None
+    top_dir = Path(top.stdout.strip()).resolve()
+    if top_dir == store.root:  # publishing from inside the store itself
+        return None
+    commit = git(top_dir, "rev-parse", "--short", "HEAD")
+    if commit.returncode != 0:
+        return None
+    remote = git(top_dir, "config", "--get", "remote.origin.url").stdout.strip()
+    remote = re.sub(r"//[^@/]+@", "//", remote)  # never record credentials embedded in a remote URL
+    return {
+        "repo": remote or top_dir.name,
+        "branch": git(top_dir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(),
+        "commit": commit.stdout.strip(),
+        "dirty": bool(git(top_dir, "status", "--porcelain").stdout.strip()),
+    }
+
+
 def cmd_publish(args) -> int:
     store = open_store(args)
     v = store.publish(
@@ -109,14 +137,125 @@ def cmd_publish(args) -> int:
         resolves=split_ids(args.resolves), assets=[Path(a) for a in args.asset or []],
         tags=split_ids(args.tag) if args.tag else None, allow_scripts=args.allow_scripts,
         carry_assets=not args.no_carry,
+        context=None if args.no_context else git_context(Path.cwd(), store),
     )
     if not args.no_build:
         rebuild(store, quiet=True)
     print(f"published {v.report.id} v{v.number}")
     print(f"  source: {store.rel(v.source)}")
-    print(f"  view:   {store.rel(v.view_path)}")
+    print(f"  page:   {store.rel(v.view_path)}")
+    gh = store.github
+    if gh:
+        print(f"  github: https://github.com/{gh['repo']}/blob/{gh['branch']}/{store.repo_path(v.source)}")
+    if v.meta.get("context"):
+        c = v.meta["context"]
+        print(f"  about:  {c['repo']} @ {c['commit']}{' (uncommitted changes)' if c.get('dirty') else ''}")
     if v.meta.get("resolves"):
         print(f"  resolved: {', '.join(v.meta['resolves'])}")
+    if (store.root / ".git").exists():
+        print('next: agentledger sync -m "..."  (commit and push the store)')
+    return 0
+
+
+def cmd_sync(args) -> int:
+    """Pull the store, rebuild, commit everything, push."""
+    store = open_store(args)
+    root = store.root
+    if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
+        rebuild(store)
+        print("store is not a git repository; rebuilt only")
+        return 0
+    upstream = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").returncode == 0
+    has_origin = bool(git(root, "remote").stdout.split())
+    if upstream and not args.no_pull:
+        r = git(root, "pull", "--rebase", "--autostash")
+        if r.returncode != 0:
+            print(r.stdout + r.stderr, file=sys.stderr)
+            print("agentledger: pull failed; resolve it in the store (comments.csv conflicts: keep both sides' rows), then sync again",
+                  file=sys.stderr)
+            return 1
+        store.invalidate()
+    written = build(store)
+    git(root, "add", "-A")
+    if git(root, "diff", "--cached", "--quiet").returncode != 0:
+        msg = args.message or "agentledger: update"
+        r = git(root, "commit", "-m", msg)
+        if r.returncode != 0:
+            print(r.stdout + r.stderr, file=sys.stderr)
+            return 1
+        print(f"committed: {msg}")
+    else:
+        print("nothing to commit" + (f" (rebuilt {len(written)} files)" if written else ""))
+    if args.no_push or not has_origin:
+        return 0
+    ahead = git(root, "rev-list", "--count", "@{u}..HEAD") if upstream else None
+    if ahead is not None and ahead.returncode == 0 and ahead.stdout.strip() == "0":
+        print("up to date with the remote")
+        return 0
+    r = git(root, "push") if upstream else git(root, "push", "-u", "origin", "HEAD")
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    print("pushed")
+    return 0
+
+
+CLAUDE_MD_BEGIN = "<!-- agentledger:begin -->"
+CLAUDE_MD_END = "<!-- agentledger:end -->"
+
+
+def cmd_setup(args) -> int:
+    """Make Claude Code publish every report into this store, from any repository."""
+    root = Path(args.store_path or args.store or ".").expanduser().resolve()
+    if not (root / CONFIG_NAME).exists():
+        raise LedgerError(f"{root} is not a store (no {CONFIG_NAME}); clone your store repo first, or `agentledger init` one")
+    claude = Path(args.claude_dir).expanduser()
+    done = []
+
+    skill = claude / "skills" / "agentledger" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text((Path(__file__).parent / "assets" / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
+    done.append(f"skill        {skill}")
+
+    if not args.no_settings:
+        settings_path = claude / "settings.json"
+        settings = read_json(settings_path) if settings_path.exists() else {}
+        env = settings.setdefault("env", {})
+        env["AGENTLEDGER_STORE"] = str(root)
+        env.setdefault("AGENTLEDGER_AUTHOR", args.author)
+        if not args.no_permissions:
+            allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+            if "Bash(agentledger:*)" not in allow:
+                allow.append("Bash(agentledger:*)")
+        write_json(settings_path, settings)
+        done.append(f"settings     {settings_path}  (env AGENTLEDGER_STORE, AGENTLEDGER_AUTHOR"
+                    f"{'; allow Bash(agentledger:*)' if not args.no_permissions else ''})")
+
+    if not args.no_claude_md:
+        md_path = claude / "CLAUDE.md"
+        block = (
+            f"{CLAUDE_MD_BEGIN}\n"
+            "## Reports go to AgentLedger\n\n"
+            "Whenever I ask for a report, write-up, analysis, audit, investigation, benchmark or experiment summary, "
+            f"publish it with the `agentledger` skill into the ledger store at `{root}` "
+            "(project = the current repo's name, report = the topic), then `agentledger sync`. "
+            "Don't leave reports only in chat or as loose files in the repo. "
+            "In chat, give a short summary and the link `agentledger publish` prints.\n"
+            f"{CLAUDE_MD_END}\n"
+        )
+        text = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        pattern = re.compile(re.escape(CLAUDE_MD_BEGIN) + r".*?" + re.escape(CLAUDE_MD_END) + r"\n?", re.DOTALL)
+        text = pattern.sub(lambda _: block, text) if pattern.search(text) else (text.rstrip("\n") + "\n\n" + block if text.strip() else block)
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(text, encoding="utf-8")
+        done.append(f"instructions {md_path}")
+
+    print(f"AgentLedger store: {root}")
+    for line in done:
+        print(f"  wrote {line}")
+    print("Restart Claude Code. From any repo, ask for a report and it lands in the ledger.")
+    if not shutil.which("agentledger"):
+        print("warning: `agentledger` is not on PATH for this shell; Claude Code needs it there", file=sys.stderr)
     return 0
 
 
@@ -512,8 +651,24 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--tag", action="append", help="tags (comma separated, repeatable)")
     s.add_argument("--allow-scripts", action="store_true", help="skip HTML sanitising (only for fully trusted reports)")
     s.add_argument("--no-carry", action="store_true", help="do not copy the previous version's assets forward")
+    s.add_argument("--no-context", action="store_true", help="do not record the git repo/commit publish ran in")
     s.add_argument("--no-build", action="store_true")
     s.set_defaults(func=cmd_publish)
+
+    s = sub.add_parser("sync", help="pull the store, rebuild, commit everything and push")
+    s.add_argument("-m", "--message", help="commit message (default: 'agentledger: update')")
+    s.add_argument("--no-pull", action="store_true")
+    s.add_argument("--no-push", action="store_true")
+    s.set_defaults(func=cmd_sync)
+
+    s = sub.add_parser("setup", help="make Claude Code publish every report into this store, from any repo")
+    s.add_argument("store_path", nargs="?", help="path to the store clone (default: --store or the current directory)")
+    s.add_argument("--claude-dir", default="~/.claude", help="Claude Code user directory (default: ~/.claude)")
+    s.add_argument("--author", default="claude-code", help="author recorded on reports Claude Code publishes")
+    s.add_argument("--no-settings", action="store_true", help="don't touch settings.json (then export AGENTLEDGER_STORE yourself)")
+    s.add_argument("--no-permissions", action="store_true", help="don't pre-approve `agentledger` commands")
+    s.add_argument("--no-claude-md", action="store_true", help="don't add the instruction block to CLAUDE.md")
+    s.set_defaults(func=cmd_setup)
 
     s = sub.add_parser("build", help="regenerate every page, the dashboard and manifest.json")
     s.set_defaults(func=cmd_build)
