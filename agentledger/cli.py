@@ -18,7 +18,7 @@ from .build import build
 from .markdown import ATTRS_RE, HEADING_RE, parse_attrs, slugify
 from .store import (
     CONFIG_NAME, GENERATED_OR_SOURCE, PROJECTS, SLUG_RE, VERSION_DIR_RE, LedgerError, Store, check_slug,
-    find_root, init_store, read_json, write_json,
+    find_root, init_store, read_json, user_config_path, write_json,
 )
 
 TEMPLATE = """---
@@ -200,62 +200,35 @@ def cmd_sync(args) -> int:
     return 0
 
 
-CLAUDE_MD_BEGIN = "<!-- agentledger:begin -->"
-CLAUDE_MD_END = "<!-- agentledger:end -->"
+SKILL_TARGETS = (("Claude Code", "~/.claude/skills"), ("Codex", "~/.agents/skills"))
 
 
 def cmd_setup(args) -> int:
-    """Make Claude Code publish every report into this store, from any repository."""
+    """Remember the store and install the skill for Claude Code and Codex."""
     root = Path(args.store_path or args.store or ".").expanduser().resolve()
     if not (root / CONFIG_NAME).exists():
         raise LedgerError(f"{root} is not a store (no {CONFIG_NAME}); clone your store repo first, or `agentledger init` one")
-    claude = Path(args.claude_dir).expanduser()
-    done = []
-
-    skill = claude / "skills" / "agentledger" / "SKILL.md"
-    skill.parent.mkdir(parents=True, exist_ok=True)
-    skill.write_text((Path(__file__).parent / "assets" / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
-    done.append(f"skill        {skill}")
-
-    if not args.no_settings:
-        settings_path = claude / "settings.json"
-        settings = read_json(settings_path) if settings_path.exists() else {}
-        env = settings.setdefault("env", {})
-        env["AGENTLEDGER_STORE"] = str(root)
-        env.setdefault("AGENTLEDGER_AUTHOR", args.author)
-        if not args.no_permissions:
-            allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-            if "Bash(agentledger:*)" not in allow:
-                allow.append("Bash(agentledger:*)")
-        write_json(settings_path, settings)
-        done.append(f"settings     {settings_path}  (env AGENTLEDGER_STORE, AGENTLEDGER_AUTHOR"
-                    f"{'; allow Bash(agentledger:*)' if not args.no_permissions else ''})")
-
-    if not args.no_claude_md:
-        md_path = claude / "CLAUDE.md"
-        block = (
-            f"{CLAUDE_MD_BEGIN}\n"
-            "## Reports go to AgentLedger\n\n"
-            "Whenever I ask for a report, write-up, analysis, audit, investigation, benchmark or experiment summary, "
-            f"publish it with the `agentledger` skill into the ledger store at `{root}` "
-            "(project = the current repo's name, report = the topic), then `agentledger sync`. "
-            "Don't leave reports only in chat or as loose files in the repo. "
-            "In chat, give a short summary and the link `agentledger publish` prints.\n"
-            f"{CLAUDE_MD_END}\n"
-        )
-        text = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-        pattern = re.compile(re.escape(CLAUDE_MD_BEGIN) + r".*?" + re.escape(CLAUDE_MD_END) + r"\n?", re.DOTALL)
-        text = pattern.sub(lambda _: block, text) if pattern.search(text) else (text.rstrip("\n") + "\n\n" + block if text.strip() else block)
-        md_path.parent.mkdir(parents=True, exist_ok=True)
-        md_path.write_text(text, encoding="utf-8")
-        done.append(f"instructions {md_path}")
-
-    print(f"AgentLedger store: {root}")
-    for line in done:
-        print(f"  wrote {line}")
-    print("Restart Claude Code. From any repo, ask for a report and it lands in the ledger.")
+    cfg = user_config_path()
+    data = read_json(cfg)
+    data["store"] = str(root)
+    write_json(cfg, data)
+    print(f"store:  {root}  (remembered in {cfg})")
+    skill = (Path(__file__).parent / "assets" / "SKILL.md").read_text(encoding="utf-8")
+    for name, base in SKILL_TARGETS:
+        if args.skills_dir:
+            base = str(Path(args.skills_dir) / name.lower().replace(" ", "-"))
+        dest = Path(base).expanduser() / "agentledger" / "SKILL.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(skill, encoding="utf-8")
+        print(f"skill:  {dest}  ({name})")
+    print("Restart Claude Code / Codex, then ask for a report, or to handle the comments on one.")
     if not shutil.which("agentledger"):
-        print("warning: `agentledger` is not on PATH for this shell; Claude Code needs it there", file=sys.stderr)
+        print("warning: `agentledger` is not on PATH for this shell; the agent needs it there", file=sys.stderr)
+    return 0
+
+
+def cmd_root(args) -> int:
+    print(open_store(args).root)
     return 0
 
 
@@ -661,14 +634,13 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-push", action="store_true")
     s.set_defaults(func=cmd_sync)
 
-    s = sub.add_parser("setup", help="make Claude Code publish every report into this store, from any repo")
+    s = sub.add_parser("setup", help="remember the store and install the skill for Claude Code and Codex")
     s.add_argument("store_path", nargs="?", help="path to the store clone (default: --store or the current directory)")
-    s.add_argument("--claude-dir", default="~/.claude", help="Claude Code user directory (default: ~/.claude)")
-    s.add_argument("--author", default="claude-code", help="author recorded on reports Claude Code publishes")
-    s.add_argument("--no-settings", action="store_true", help="don't touch settings.json (then export AGENTLEDGER_STORE yourself)")
-    s.add_argument("--no-permissions", action="store_true", help="don't pre-approve `agentledger` commands")
-    s.add_argument("--no-claude-md", action="store_true", help="don't add the instruction block to CLAUDE.md")
+    s.add_argument("--skills-dir", help=argparse.SUPPRESS)  # tests: install under one folder instead of ~/.claude and ~/.agents
     s.set_defaults(func=cmd_setup)
+
+    s = sub.add_parser("root", help="print the store folder")
+    s.set_defaults(func=cmd_root)
 
     s = sub.add_parser("build", help="regenerate every page, the dashboard and manifest.json")
     s.set_defaults(func=cmd_build)

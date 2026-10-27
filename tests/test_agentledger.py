@@ -209,23 +209,29 @@ class AutomationTests(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(self.tmp)
 
-    def test_setup_is_idempotent_and_keeps_existing_settings(self):
+    def test_setup_remembers_store_and_installs_skill(self):
         store = init_store(self.tmp / "store", name="S")
-        claude = self.tmp / "claude"
-        claude.mkdir()
-        (claude / "settings.json").write_text(json.dumps({"model": "x", "permissions": {"allow": ["Bash(ls:*)"]}}))
-        (claude / "CLAUDE.md").write_text("# Mine\n\nKeep this.\n")
-        for _ in range(2):
-            self.assertEqual(run("setup", str(store), "--claude-dir", str(claude))[0], 0)
-        settings = json.loads((claude / "settings.json").read_text())
-        self.assertEqual(settings["model"], "x")
-        self.assertEqual(settings["env"]["AGENTLEDGER_STORE"], str(store))
-        self.assertEqual(settings["permissions"]["allow"], ["Bash(ls:*)", "Bash(agentledger:*)"])
-        md = (claude / "CLAUDE.md").read_text()
-        self.assertTrue(md.startswith("# Mine"))
-        self.assertEqual(md.count("agentledger:begin"), 1)
-        skill = (claude / "skills/agentledger/SKILL.md").read_text()
-        self.assertTrue(skill.startswith("---\nname: agentledger\n"))
+        os.environ["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+        skills = self.tmp / "skills"
+        try:
+            for _ in range(2):
+                self.assertEqual(run("setup", str(store), "--skills-dir", str(skills))[0], 0)
+            cwd = os.getcwd()
+            os.chdir(self.tmp)  # outside any store: the remembered one is used
+            try:
+                code, out = run("root")
+            finally:
+                os.chdir(cwd)
+        finally:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        self.assertEqual(out.strip(), str(store))
+        for agent in ("claude-code", "codex"):
+            skill = (skills / agent / "agentledger" / "SKILL.md").read_text()
+            self.assertTrue(skill.startswith("---\nname: agentledger\ndescription: "))
+
+    def test_repo_skill_matches_packaged_skill(self):
+        top = Path(__file__).resolve().parent.parent
+        self.assertEqual((top / "skills/agentledger/SKILL.md").read_text(), (top / "agentledger/assets/SKILL.md").read_text())
 
     def test_publish_records_context_and_sync_pushes(self):
         remote = self.tmp / "remote.git"
