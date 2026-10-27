@@ -4,11 +4,14 @@ Agent writes a report → you comment on it in the browser → the agent answers
 
 ## Use it in Claude Code or Codex
 
+This repo is only the tool. Your reports live in **your own store**, a git repo you keep private.
+
 ```sh
 pip install "git+https://github.com/SecretSettler/AgentLedger"
-git clone https://github.com/SecretSettler/agent-ledger-store ~/agent-ledger-store   # where reports are kept
-agentledger setup ~/agent-ledger-store
+agentledger setup ~/path/to/your-store      # a local clone of your private store repo
 ```
+
+No store yet: `agentledger init ~/my-ledger --repo YOU/my-ledger`, then push that folder to a new **private** GitHub repo.
 
 `setup` remembers where the store is and copies the skill, [`skills/agentledger/SKILL.md`](skills/agentledger/SKILL.md), to
 `~/.claude/skills/agentledger/` (Claude Code) and `~/.agents/skills/agentledger/` (Codex). Restart the agent, then just ask, in any repo:
@@ -23,8 +26,17 @@ To review: open `index.html` in the store (or run `agentledger serve` in it and 
 <details><summary>Without <code>setup</code></summary>
 
 Copy `skills/agentledger` into `~/.claude/skills/` or `~/.agents/skills/` (older Codex versions: `~/.codex/skills/`),
-and `export AGENTLEDGER_STORE=~/agent-ledger-store` in your shell profile.
+and `export AGENTLEDGER_STORE=~/path/to/your-store` in your shell profile.
 </details>
+
+## Private stores
+
+- Nothing goes anywhere but your own repo. Pages load no external scripts, fonts or images; the only network call a page makes is
+  **Save to GitHub**, which writes `comments.csv` to your repo with your token (a fine-grained token works for private repos).
+  `agentledger sync` pushes with your normal git credentials.
+- To read and review: open `index.html` in your clone, or run `agentledger serve` there
+  (on a remote machine: `ssh -L 8765:localhost:8765 host`, then http://localhost:8765). GitHub also renders each `report.md`.
+- Don't use githack, and don't turn on GitHub Pages: both serve the files publicly.
 
 ## What it does
 
@@ -34,7 +46,7 @@ and `export AGENTLEDGER_STORE=~/agent-ledger-store` in your shell profile.
 4. The agent runs `agentledger comments list`, investigates each thread, replies in place, and publishes **v2**. Changed and new modules are flagged, and resolved threads point at the version that settled them.
 5. The dashboard tracks every project, report, version and open thread.
 
-No dependencies: the CLI is pure Python 3.9+ and every page is a single HTML file that works from `file://`, any static host (GitHub Pages, githack), or after an `scp`.
+No dependencies: the CLI is pure Python 3.9+ and every page is a single HTML file that works from `file://`, `agentledger serve`, or after an `scp` (and from a static host if the store is public).
 
 ## New store
 
