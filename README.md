@@ -1,10 +1,34 @@
 # AgentLedger
 
-Gain a clearer understanding of your AI agents' outputs and conclusions by commenting on traces, modularizing reports, and maintaining historical logs.
+Agent writes a report → you comment on it in the browser → the agent answers and publishes v2. Every report is modular, versioned and filed in one place.
 
-AgentLedger turns the reports your agents write into **modular, versioned, reviewable pages**, and turns your review comments into **a queue the agent can work through**:
+## Use it in Claude Code or Codex
 
-1. An agent writes a Markdown report and publishes it with `agentledger publish`. Every `##` section becomes a module, the file lands in a fixed folder (`projects/<project>/<report>/v001/`), and a self-contained HTML page is generated next to it.
+```sh
+pip install "git+https://github.com/SecretSettler/AgentLedger"
+git clone https://github.com/SecretSettler/agent-ledger-store ~/agent-ledger-store   # where reports are kept
+agentledger setup ~/agent-ledger-store
+```
+
+`setup` remembers where the store is and copies the skill, [`skills/agentledger/SKILL.md`](skills/agentledger/SKILL.md), to
+`~/.claude/skills/agentledger/` (Claude Code) and `~/.agents/skills/agentledger/` (Codex). Restart the agent, then just ask, in any repo:
+
+- "write this up as a report" / "把这个分析写成报告"
+- "address the review comments on harness-vs-paper" / "处理 harness-vs-paper 上的评论"
+
+The agent publishes into `projects/<repo>/<topic>/vNNN/`, pushes the store, and replies with the link.
+
+To review: open `index.html` in the store (or run `agentledger serve` in it and open http://localhost:8765), select text, press **Comment**, then **Save**.
+
+<details><summary>Without <code>setup</code></summary>
+
+Copy `skills/agentledger` into `~/.claude/skills/` or `~/.agents/skills/` (older Codex versions: `~/.codex/skills/`),
+and `export AGENTLEDGER_STORE=~/agent-ledger-store` in your shell profile.
+</details>
+
+## What it does
+
+1. An agent publishes a Markdown report with `agentledger publish`. Every `##` section becomes a module, the file lands in a fixed folder (`projects/<project>/<report>/v001/`), and a self-contained HTML page is generated next to it. The page records which repo and commit the report describes.
 2. You read it in the browser, select any sentence or table cell, and press **Comment**, as in a doc review. Comments carry the quoted text, the module and the version they were made on.
 3. Save the comments to the store (local server or GitHub), or **Export CSV** and hand the file over.
 4. The agent runs `agentledger comments list`, investigates each thread, replies in place, and publishes **v2**. Changed and new modules are flagged, and resolved threads point at the version that settled them.
@@ -12,50 +36,13 @@ AgentLedger turns the reports your agents write into **modular, versioned, revie
 
 No dependencies: the CLI is pure Python 3.9+ and every page is a single HTML file that works from `file://`, any static host (GitHub Pages, githack), or after an `scp`.
 
-## Install
-
-```sh
-pipx install git+https://github.com/SecretSettler/AgentLedger
-# or, from a clone
-pip install -e .
-```
-
-## Quick start
+## New store
 
 ```sh
 agentledger init my-ledger --name "My ledger" --repo OWNER/my-ledger   # --repo enables "Save to GitHub"
-cd my-ledger
-agentledger template --title "Why is the harness slower?" > /tmp/draft.md   # a skeleton to start from
-agentledger publish oneswe/harness-vs-paper /tmp/draft.md --author claude-code
-agentledger serve --open        # dashboard at http://localhost:8765/, comments save straight into the store
 ```
 
 To try the UI on sample data: `sh examples/build-demo.sh` (the numbers in it are made up).
-
-## Use it for every report, from any repo
-
-Run this once on the machine where Claude Code runs:
-
-```sh
-git clone git@github.com:OWNER/my-ledger.git ~/my-ledger
-agentledger setup ~/my-ledger
-```
-
-`setup` writes to `~/.claude` (use `--claude-dir` for another location):
-
-- `skills/agentledger/SKILL.md`: the workflow for writing reports and handling review comments;
-- `settings.json`: `env.AGENTLEDGER_STORE` (so the CLI finds the store from any directory), `env.AGENTLEDGER_AUTHOR=claude-code`,
-  and a `Bash(agentledger:*)` permission so the commands run without prompts (`--no-permissions` to skip);
-- `CLAUDE.md`: a short block, between `agentledger:begin/end` markers, telling Claude to publish every report there.
-
-Re-running it updates those pieces in place and leaves the rest of your settings alone. After a restart, asking Claude Code in any
-repository for a report, an analysis or a write-up makes it:
-
-1. `agentledger sync` (pull the store), pick `<repo-name>/<topic>`, reusing the report if the topic already exists;
-2. write the draft, `agentledger publish` it (which records the repo, branch and commit it describes, shown on the page);
-3. `agentledger sync -m "..."` to commit and push, then reply with a summary and the link.
-
-Ask it to "handle the review comments on <report>" and it pulls, answers each thread, publishes a revision and pushes.
 
 ## Store layout
 
@@ -115,8 +102,7 @@ agentledger publish oneswe/harness-vs-paper draft.md --changes "Explained the to
 git add -A && git commit -m "harness-vs-paper v2" && git push
 ```
 
-`agentledger sync [-m message]` pulls, rebuilds, commits and pushes the store in one step. The Claude Code skill that teaches
-this workflow ships in the package (`agentledger/assets/SKILL.md`) and is installed by `agentledger setup`.
+`agentledger sync [-m message]` pulls, rebuilds, commits and pushes the store in one step.
 
 ## Writing reports
 
@@ -137,7 +123,8 @@ this workflow ships in the package (`agentledger/assets/SKILL.md`) and is instal
 | `build` | Regenerate every page, the dashboard and `manifest.json` (writes only what changed) |
 | `serve [--port --host --allow-host --open]` | Local server; the browser can save comments into the store |
 | `sync [-m msg] [--no-pull --no-push]` | Pull, rebuild, commit and push the store |
-| `setup <store> [--claude-dir --no-permissions --no-claude-md]` | Make Claude Code publish every report into this store |
+| `setup <store>` | Remember the store; install the skill for Claude Code and Codex |
+| `root` | Print the store folder |
 | `tree`, `check` | Show the hierarchy; validate the layout |
 | `draft <id> [-o file] [--version N]` | Copy a version's source to a working file |
 | `template` | Print a report skeleton |
@@ -148,7 +135,7 @@ this workflow ships in the package (`agentledger/assets/SKILL.md`) and is instal
 | `comments add / reply / resolve / reopen / wontfix` | Work threads from the CLI |
 | `comments import <csv\|->`, `comments export [id] [-o file]` | Move threads between browser and store |
 
-The store is found by walking up from the current directory to `agentledger.json`, or from `--store` / `$AGENTLEDGER_STORE`. `$AGENTLEDGER_AUTHOR` sets the default author.
+The store is `--store`, else `$AGENTLEDGER_STORE`, else the nearest `agentledger.json` above the current directory, else the one `setup` remembered (`~/.config/agentledger/config.json`). `$AGENTLEDGER_AUTHOR` sets the default author.
 
 ## Comment CSV
 

@@ -194,7 +194,13 @@ def _is_report_dir(path: Path) -> bool:
     return any(c.is_dir() and VERSION_DIR_RE.match(c.name) for c in path.iterdir())
 
 
+def user_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base).expanduser() / "agentledger" / "config.json"
+
+
 def find_root(start: Optional[Path] = None) -> Path:
+    """$AGENTLEDGER_STORE, else the nearest store above the current directory, else the one `setup` remembered."""
     env = os.environ.get("AGENTLEDGER_STORE")
     if env:
         root = Path(env).expanduser().resolve()
@@ -205,8 +211,13 @@ def find_root(start: Optional[Path] = None) -> Path:
     for p in [here, *here.parents]:
         if (p / CONFIG_NAME).exists():
             return p
-    raise LedgerError(f"no store configured: no {CONFIG_NAME} here or above and AGENTLEDGER_STORE is unset; "
-                      "run `agentledger setup <path-to-store>` once (or `agentledger init` to create a store)")
+    remembered = read_json(user_config_path()).get("store")
+    if remembered:
+        root = Path(remembered).expanduser().resolve()
+        if (root / CONFIG_NAME).exists():
+            return root
+        raise LedgerError(f"the store remembered in {user_config_path()} ({root}) has no {CONFIG_NAME}; run `agentledger setup <path>` again")
+    raise LedgerError("no store configured: run `agentledger setup <path-to-store-clone>` once")
 
 
 class Store:
