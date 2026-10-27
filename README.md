@@ -23,6 +23,26 @@ The agent publishes into `projects/<repo>/<topic>/vNNN/`, pushes the store, and 
 
 To review: open `index.html` in the store (or run `agentledger serve` in it and open http://localhost:8765), select text, press **Comment**, then **Save**.
 
+## Ask the agent about any passage
+
+Select text in a report and press **Ask** (or `a`). Your question, the quoted passage and the thread so far become the
+prompt; the report source, the repository it describes (at the recorded commit's checkout) and the **traces** attached
+at publish time are the context. The answer streams into the thread and is saved as an agent reply, so follow-ups
+(**Reply & ask**) continue the same conversation.
+
+```sh
+agentledger serve                 # Ask uses `claude` if installed, else `codex`
+agentledger serve --ask codex     # or pick one; --ask-cmd "<cmd>" for anything that reads a prompt on stdin
+agentledger ask <comment-id>      # the same from the terminal; --print-prompt shows exactly what the agent gets
+```
+
+The agent runs on your machine under your own Claude Code or Codex login, read-only: Claude Code with only
+Read/Grep/Glob, Codex with `--sandbox read-only`. What it reads goes to that model provider exactly as in your usual
+agent sessions; AgentLedger itself sends nothing anywhere.
+
+Traces come from `publish --trace`: `auto` attaches the transcript of the Claude Code or Codex session that is publishing,
+and any path attaches logs or data. They are stored gzip-compressed in `vNNN/traces/` and listed at the end of the report.
+
 <details><summary>Without <code>setup</code></summary>
 
 Copy `skills/agentledger` into `~/.claude/skills/` or `~/.agents/skills/` (older Codex versions: `~/.codex/skills/`),
@@ -33,7 +53,8 @@ and `export AGENTLEDGER_STORE=~/path/to/your-store` in your shell profile.
 
 - Nothing goes anywhere but your own repo. Pages load no external scripts, fonts or images; the only network call a page makes is
   **Save to GitHub**, which writes `comments.csv` to your repo with your token (a fine-grained token works for private repos).
-  `agentledger sync` pushes with your normal git credentials.
+  `agentledger sync` pushes with your normal git credentials. **Ask** goes to `agentledger serve` on your machine, which runs
+  your own agent CLI (see above).
 - To read and review: open `index.html` in your clone, or run `agentledger serve` there
   (on a remote machine: `ssh -L 8765:localhost:8765 host`, then http://localhost:8765). GitHub also renders each `report.md`.
 - Don't use githack, and don't turn on GitHub Pages: both serve the files publicly.
@@ -131,9 +152,10 @@ git add -A && git commit -m "harness-vs-paper v2" && git push
 | Command | |
 |---|---|
 | `init [dir] --name --repo --branch` | Create a store |
-| `publish <id> <file\|folder>` | New report or new version; records the git repo and commit it ran in. `--title --summary --about --author --changes --resolves --asset --tag --allow-scripts --no-carry --no-context` |
+| `publish <id> <file\|folder>` | New report or new version; records the git repo and commit it ran in. `--trace auto\|PATH --title --summary --about --author --changes --resolves --asset --tag --allow-scripts --no-carry --no-context` |
 | `build` | Regenerate every page, the dashboard and `manifest.json` (writes only what changed) |
-| `serve [--port --host --allow-host --open]` | Local server; the browser can save comments into the store |
+| `serve [--port --host --allow-host --open --ask --ask-cmd]` | Local server; the browser saves comments into the store and can Ask the agent |
+| `ask <comment-id> [--backend --cmd --print-prompt]` | Have the agent answer a review thread |
 | `sync [-m msg] [--no-pull --no-push]` | Pull, rebuild, commit and push the store |
 | `setup <store>` | Remember the store; install the skill for Claude Code and Codex |
 | `root` | Print the store folder |

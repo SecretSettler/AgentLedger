@@ -15,9 +15,10 @@ from pathlib import Path
 from . import __version__
 from . import comments as cm
 from .build import build
-from .markdown import ATTRS_RE, HEADING_RE, parse_attrs, slugify
+from .ask import AskError, answer_thread, build_prompt, resolve_backend
+from .traces import detect_session, human_size
 from .store import (
-    CONFIG_NAME, GENERATED_OR_SOURCE, PROJECTS, SLUG_RE, VERSION_DIR_RE, LedgerError, Store, check_slug,
+    CONFIG_NAME, GENERATED_OR_SOURCE, PROJECTS, SLUG_RE, VERSION_DIR_RE, LedgerError, Store, check_slug, source_line,
     find_root, init_store, read_json, user_config_path, write_json,
 )
 
@@ -122,10 +123,26 @@ def git_context(cwd: Path, store: Store) -> dict | None:
     remote = re.sub(r"//[^@/]+@", "//", remote)  # never record credentials embedded in a remote URL
     return {
         "repo": remote or top_dir.name,
+        "path": str(top_dir),
         "branch": git(top_dir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(),
         "commit": commit.stdout.strip(),
         "dirty": bool(git(top_dir, "status", "--porcelain").stdout.strip()),
     }
+
+
+def resolve_traces(values) -> list[Path]:
+    out = []
+    for value in values or []:
+        if value == "auto":
+            found = detect_session(Path.cwd())
+            if found:
+                out.append(found)
+            else:
+                print("note: --trace auto found no Claude Code or Codex session for this directory; publishing without it",
+                      file=sys.stderr)
+        else:
+            out.append(Path(value).expanduser())
+    return out
 
 
 def cmd_publish(args) -> int:
@@ -138,6 +155,7 @@ def cmd_publish(args) -> int:
         tags=split_ids(args.tag) if args.tag else None, allow_scripts=args.allow_scripts,
         carry_assets=not args.no_carry,
         context=None if args.no_context else git_context(Path.cwd(), store),
+        traces=resolve_traces(args.trace),
     )
     if not args.no_build:
         rebuild(store, quiet=True)
@@ -150,6 +168,8 @@ def cmd_publish(args) -> int:
     if v.meta.get("context"):
         c = v.meta["context"]
         print(f"  about:  {c['repo']} @ {c['commit']}{' (uncommitted changes)' if c.get('dirty') else ''}")
+    for t in v.meta.get("traces", []):
+        print(f"  trace:  {t['path']}  ({human_size(t['bytes'])} from {t['source']})")
     if v.meta.get("resolves"):
         print(f"  resolved: {', '.join(v.meta['resolves'])}")
     if (store.root / ".git").exists():
@@ -424,11 +444,17 @@ def cmd_serve(args) -> int:
 
     store = open_store(args)
     rebuild(store, quiet=True)
-    httpd = serve(store, host=args.host, port=args.port, extra_hosts=tuple(args.allow_host or ()), quiet=args.quiet)
+    backend = resolve_backend(args.ask, args.ask_cmd)
+    httpd = serve(store, host=args.host, port=args.port, extra_hosts=tuple(args.allow_host or ()), quiet=args.quiet,
+                  backend=backend, ask_timeout=args.ask_timeout)
     shown = "localhost" if args.host in ("127.0.0.1", "0.0.0.0", "::") else args.host
     url = f"http://{shown}:{httpd.server_address[1]}/"
     print(f"serving {store.root} at {url}  (Ctrl+C to stop)")
     print("comments saved in the browser are written to the store and rebuilt")
+    if backend:
+        print(f"select text and press Ask: {backend.name} answers, read-only, from the report, its traces and repo")
+    else:
+        print("Ask is off (no `claude` or `codex` on PATH; see --ask / --ask-cmd)")
     if args.open:
         webbrowser.open(url)
     try:
@@ -440,39 +466,27 @@ def cmd_serve(args) -> int:
     return 0
 
 
-# ---------------------------------------------------------------- comments
-def source_line(store: Store, row: dict) -> str:
-    """Best-effort ``path:line`` pointing an agent at the commented text."""
+def cmd_ask(args) -> int:
+    store = open_store(args)
+    if args.print_prompt:
+        prompt, cwd = build_prompt(store, args.id)
+        print(f"# working directory: {cwd}", file=sys.stderr)
+        sys.stdout.write(prompt)
+        return 0
+    backend = resolve_backend(args.backend, args.cmd)
+    if backend is None:
+        raise LedgerError("no agent to ask: install Claude Code (`claude`) or Codex (`codex`), or pass --cmd")
     try:
-        v = store.report(row["report"]).version(int(row["version"]))
-        src = v.source
-        lines = src.read_text(encoding="utf-8").splitlines()
-    except (LedgerError, ValueError, OSError):
-        return ""
-    rel = store.rel(src)
-    quote = re.sub(r"\s+", " ", row.get("quote") or "").strip()
-    if quote:
-        for probe in (quote[:60], quote[:30], max(quote.split(" "), key=len) if " " in quote else ""):
-            if len(probe) < 8:
-                continue
-            for i, ln in enumerate(lines, 1):
-                plain = re.sub(r"[*_`~]|\[|\]\([^)]*\)", "", ln)
-                if probe in re.sub(r"\s+", " ", plain):
-                    return f"{rel}:{i}"
-    mod = row.get("module")
-    if mod:
-        for i, ln in enumerate(lines, 1):
-            m = HEADING_RE.match(ln)
-            if not m or not m.group(2):
-                continue
-            text = m.group(2)
-            am = ATTRS_RE.search(text)
-            hid = parse_attrs(am.group(1)).get("id") if am else None
-            if hid == mod or slugify(ATTRS_RE.sub("", text)) == mod:
-                return f"{rel}:{i}"
-    return rel
+        row = answer_thread(store, args.id, backend, timeout=args.timeout,
+                            on_progress=lambda s: print(f"  … {s}", file=sys.stderr))
+    except AskError as exc:
+        raise LedgerError(str(exc)) from exc
+    print(row["body"])
+    print(f"\n(saved as reply {row['id']} on {row['reply_to']})", file=sys.stderr)
+    return 0
 
 
+# ---------------------------------------------------------------- comments
 def filter_threads(store: Store, args) -> list[dict]:
     reports = [store.report(args.report)] if getattr(args, "report", None) else store.reports()
     if getattr(args, "report", None) and getattr(args, "recursive", False):
@@ -624,6 +638,9 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--tag", action="append", help="tags (comma separated, repeatable)")
     s.add_argument("--allow-scripts", action="store_true", help="skip HTML sanitising (only for fully trusted reports)")
     s.add_argument("--no-carry", action="store_true", help="do not copy the previous version's assets forward")
+    s.add_argument("--trace", action="append", metavar="auto|PATH",
+                   help="attach the work behind the report: 'auto' = this Claude Code / Codex session's transcript, "
+                        "or a log file / folder (repeatable)")
     s.add_argument("--no-context", action="store_true", help="do not record the git repo/commit publish ran in")
     s.add_argument("--no-build", action="store_true")
     s.set_defaults(func=cmd_publish)
@@ -694,7 +711,19 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-host", action="append", help="extra Host header to accept (e.g. a tunnel hostname)")
     s.add_argument("--open", action="store_true", help="open the dashboard in a browser")
     s.add_argument("--quiet", action="store_true")
+    s.add_argument("--ask", default="auto", choices=["auto", "claude", "codex", "off"],
+                   help="agent that answers Ask questions from the page (default: claude, else codex, if installed)")
+    s.add_argument("--ask-cmd", help="any command that reads a prompt on stdin and prints an answer, instead of claude/codex")
+    s.add_argument("--ask-timeout", type=float, default=900, help="seconds before an answer is abandoned")
     s.set_defaults(func=cmd_serve)
+
+    s = sub.add_parser("ask", help="have the agent answer a review thread (the same as Ask in the page)")
+    s.add_argument("id", help="comment id")
+    s.add_argument("--backend", default="auto", choices=["auto", "claude", "codex"])
+    s.add_argument("--cmd", help="any command that reads a prompt on stdin and prints an answer")
+    s.add_argument("--timeout", type=float, default=900)
+    s.add_argument("--print-prompt", action="store_true", help="print the prompt and context instead of asking")
+    s.set_defaults(func=cmd_ask)
 
     c = sub.add_parser("comments", help="list, reply to, resolve, import or export review threads")
     csub = c.add_subparsers(dest="ccmd", required=True, metavar="action")

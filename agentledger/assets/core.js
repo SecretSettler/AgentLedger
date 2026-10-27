@@ -47,6 +47,17 @@
     return el;
   };
 
+  // Safe Markdown subset for comment bodies: escape everything, then `code`, **bold**, *em*, links, bullets.
+  AL.mdLite = function (text) {
+    const stash = [];
+    let s = AL.esc(text).replace(/`([^`\n]+)`/g, (_, c) => { stash.push(`<code>${c}</code>`); return `\u0000${stash.length - 1}\u0000`; });
+    s = s.replace(/\*\*(?=\S)([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*\w])\*(?=\S)([^*\n]+?)\*(?!\w)/g, '$1<em>$2</em>')
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/^(\s*)[-*] /gm, '$1• ');
+    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[+i]);
+  };
+
   AL.esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   const ICONS = {
@@ -80,6 +91,7 @@
     expand: '<path d="m7 9 5 5 5-5"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
+    spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
   };
   AL.icon = (name, cls) => `<svg class="al-ico${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
   AL.iconEl = (name, cls) => { const t = document.createElement('template'); t.innerHTML = AL.icon(name, cls); return t.content.firstChild; };
@@ -281,13 +293,31 @@
       if (this.http) {
         try {
           const r = await fetch(this.store.root + '__agentledger/ping', { cache: 'no-store' });
-          if (r.ok) { const j = await r.json(); if (j && j.agentledger) return (this.mode = 'server'); }
+          if (r.ok) { const j = await r.json(); if (j && j.agentledger) { this.askBackend = j.ask || null; return (this.mode = 'server'); } }
         } catch (e) { /* not served by agentledger */ }
       }
       return (this.mode = this.store.github ? 'github' : 'none');
     }
     label() {
       return this.mode === 'server' ? 'Save to store' : this.mode === 'github' ? 'Save to GitHub' : '';
+    }
+    async post(path, body) {
+      const r = await fetch(this.store.root + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-AgentLedger': '1' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
+      return j;
+    }
+    // Ask the agent behind `agentledger serve` to answer a thread; unsaved rows are saved first.
+    async ask(rows, thread) { return this.post('__agentledger/ask', { rows, thread }); }
+    async askStatus(job) {
+      const r = await fetch(this.store.root + '__agentledger/ask/' + encodeURIComponent(job), { headers: { 'X-AgentLedger': '1' }, cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
+      return j;
     }
     async fetchCsv(href) {
       if (!this.http) return null;
@@ -303,14 +333,7 @@
       throw new Error('No save target: export the CSV instead.');
     }
     async saveServer(rows) {
-      const r = await fetch(this.store.root + '__agentledger/comments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-AgentLedger': '1' },
-        body: JSON.stringify({ rows }),
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
-      return j.rows || [];
+      return (await this.post('__agentledger/comments', { rows })).rows || [];
     }
     async saveGitHub(rows, pathFor) {
       const gh = this.store.github;

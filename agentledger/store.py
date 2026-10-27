@@ -35,7 +35,9 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from . import comments as cm
-from .markdown import slugify, split_front_matter
+from .markdown import ATTRS_RE, HEADING_RE, parse_attrs, slugify, split_front_matter
+from .traces import TRACES_DIR
+from .traces import attach as attach_traces
 
 CONFIG_NAME = "agentledger.json"
 PROJECTS = "projects"
@@ -344,6 +346,7 @@ class Store:
         allow_scripts: bool = False,
         carry_assets: bool = True,
         context: dict | None = None,
+        traces: tuple[Path, ...] | list[Path] = (),
     ) -> Version:
         source = Path(source)
         if not source.exists():
@@ -385,6 +388,8 @@ class Store:
                     rel = f.relative_to(prev)
                     if f.is_dir() or (len(rel.parts) == 1 and rel.name in GENERATED_OR_SOURCE) or (vdir / rel).exists():
                         continue
+                    if rel.parts[0] == TRACES_DIR:  # traces belong to the version that produced them
+                        continue
                     (vdir / rel).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(f, vdir / rel)
             for asset in assets:
@@ -396,6 +401,10 @@ class Store:
                     shutil.copy2(asset, dest)
                 else:
                     raise LedgerError(f"asset {asset} does not exist")
+            for t in traces:
+                if not Path(t).exists():
+                    raise LedgerError(f"trace {t} does not exist")
+            trace_meta = attach_traces(vdir, [Path(t) for t in traces])
         except Exception:
             shutil.rmtree(vdir, ignore_errors=True)
             raise
@@ -414,6 +423,8 @@ class Store:
         }
         if context:
             meta["context"] = context
+        if trace_meta:
+            meta["traces"] = trace_meta
         if allow_scripts:
             meta["allow_scripts"] = True
         write_json(vdir / "meta.json", meta)
@@ -534,6 +545,38 @@ class Store:
         return row
 
 
+def source_line(store: Store, row: dict) -> str:
+    """Best-effort ``path:line`` pointing an agent at the commented text."""
+    try:
+        v = store.report(row["report"]).version(int(row["version"]))
+        src = v.source
+        lines = src.read_text(encoding="utf-8").splitlines()
+    except (LedgerError, ValueError, OSError):
+        return ""
+    rel = store.rel(src)
+    quote = re.sub(r"\s+", " ", row.get("quote") or "").strip()
+    if quote:
+        for probe in (quote[:60], quote[:30], max(quote.split(" "), key=len) if " " in quote else ""):
+            if len(probe) < 8:
+                continue
+            for i, ln in enumerate(lines, 1):
+                plain = re.sub(r"[*_`~]|\[|\]\([^)]*\)", "", ln)
+                if probe in re.sub(r"\s+", " ", plain):
+                    return f"{rel}:{i}"
+    mod = row.get("module")
+    if mod:
+        for i, ln in enumerate(lines, 1):
+            m = HEADING_RE.match(ln)
+            if not m or not m.group(2):
+                continue
+            text = m.group(2)
+            am = ATTRS_RE.search(text)
+            hid = parse_attrs(am.group(1)).get("id") if am else None
+            if hid == mod or slugify(ATTRS_RE.sub("", text)) == mod:
+                return f"{rel}:{i}"
+    return rel
+
+
 def _report_order(r: Report):
     return (r.info.get("order", 1_000_000), r.title.lower())
 
@@ -566,5 +609,5 @@ def init_store(path: Path, *, name: str, repo: str | None = None, branch: str = 
     (path / PROJECTS).mkdir(exist_ok=True)
     gitignore = path / ".gitignore"
     if not gitignore.exists():
-        gitignore.write_text(".drafts/\n__pycache__/\n.DS_Store\n", encoding="utf-8")
+        gitignore.write_text(".drafts/\n.cache/\n__pycache__/\n.DS_Store\n", encoding="utf-8")
     return path

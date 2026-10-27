@@ -3,21 +3,26 @@ import io
 import json
 import os
 import shutil
+import re
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from agentledger import comments as cm
+from agentledger.ask import ClaudeStream, resolve_backend
 from agentledger.build import build
 from agentledger.cli import main
 from agentledger.markdown import render
 from agentledger.modules import split_modules
 from agentledger.sanitize import sanitize
 from agentledger.server import serve
+from agentledger.traces import detect_session
 from agentledger.store import LedgerError, Store, init_store
 
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "demo"
@@ -263,6 +268,121 @@ class AutomationTests(unittest.TestCase):
         self.assertIn("first report", log)
         code, out = run("sync")
         self.assertIn("nothing to commit", out)
+
+
+FAKE_AGENT = """
+import sys
+prompt = sys.stdin.read()
+trace = next((l for l in prompt.splitlines() if l.startswith("- ") and ".jsonl" in l), "no trace")
+quote = next((l for l in prompt.splitlines() if l.startswith("> ")), "no quote")
+last = [l for l in prompt.splitlines() if l.startswith("- ") and "(human)" in l][-1]
+print("FAKE ANSWER | " + quote + " | " + trace.split()[1].rsplit("/", 1)[-1] + " | " + last)
+"""
+
+
+class AskTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = init_store(self.tmp / "store", name="Ask")
+        self.store = Store(self.root)
+        self.trace = self.tmp / "session.jsonl"
+        self.trace.write_text('{"type":"user","message":"how many tokens?"}\n' * 200)
+        self.store.publish("demo/benchmark", DEMO / "benchmark-v1.md", traces=[self.trace])
+        self.store.save_rows(cm.parse((DEMO / "comments-v1.csv").read_text()))
+        build(self.store)
+        agent = self.tmp / "fake_agent.py"
+        agent.write_text(FAKE_AGENT)
+        self.cmd = f"{sys.executable} {agent}"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_trace_stored_compressed_and_not_carried(self):
+        v1 = self.root / "projects/demo/benchmark/v001"
+        self.assertTrue((v1 / "traces/session.jsonl.gz").exists())
+        meta = json.loads((v1 / "meta.json").read_text())
+        self.assertEqual(meta["traces"][0]["bytes"], self.trace.stat().st_size)
+        self.store.publish("demo/benchmark", DEMO / "benchmark-v2.md")
+        self.assertFalse((self.root / "projects/demo/benchmark/v002/traces").exists())
+        build(self.store)
+        self.assertIn("traces/session.jsonl.gz", (self.root / "projects/demo/benchmark/v002/index.html").read_text())
+
+    def test_print_prompt_and_cli_ask(self):
+        code, out = run("--store", str(self.root), "ask", "c_demo1", "--print-prompt")
+        self.assertEqual(code, 0)
+        self.assertIn("> Harness out tok", out)
+        self.assertIn(".cache/projects/demo/benchmark/v001/traces/session.jsonl", out)
+        self.assertIn("alice (human): look at this column", out)
+        code, out = run("--store", str(self.root), "ask", "c_demo1", "--cmd", self.cmd)
+        self.assertEqual(code, 0, out)
+        self.assertIn("FAKE ANSWER | > Harness out tok | session.jsonl", out)
+        reply = [r for r in Store(self.root).comments() if r["reply_to"] == "c_demo1"][-1]
+        self.assertEqual((reply["role"], reply["version"]), ("agent", "1"))
+
+    def test_claude_stream_parsing(self):
+        st = ClaudeStream()
+        notes = [st.feed(json.dumps(e)) for e in (
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Grep", "input": {"pattern": "out tok", "path": "/x/s.jsonl"}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "draft"}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "final answer"},
+        )]
+        self.assertEqual(notes[1], "Grep 'out tok' in s.jsonl")
+        self.assertEqual(st.final(), "final answer")
+        bad = ClaudeStream()
+        bad.feed(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True}))
+        self.assertTrue(bad.error)
+
+    def test_detect_claude_session(self):
+        work = self.tmp / "work dir"
+        work.mkdir()
+        proj = self.tmp / "claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(work.resolve()))
+        proj.mkdir(parents=True)
+        (proj / "old.jsonl").write_text("{}")
+        os.utime(proj / "old.jsonl", (time.time() - 600, time.time() - 600))
+        (proj / "current.jsonl").write_text("{}")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
+        os.environ["CODEX_HOME"] = str(self.tmp / "no-codex")
+        try:
+            self.assertEqual(detect_session(work).name, "current.jsonl")
+            self.assertIsNone(detect_session(self.tmp))
+        finally:
+            os.environ.pop("CLAUDE_CONFIG_DIR")
+            os.environ.pop("CODEX_HOME")
+
+    def test_server_ask_round_trip(self):
+        backend = resolve_backend(cmd=self.cmd)
+        httpd = serve(self.store, port=0, quiet=True, backend=backend)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{port}/__agentledger"
+        hdr = {"Content-Type": "application/json", "X-AgentLedger": "1"}
+        try:
+            with urllib.request.urlopen(f"{base}/ping") as r:
+                self.assertEqual(json.loads(r.read())["ask"], "fake_agent")
+            q = {"id": "c_q1", "report": "demo/benchmark", "version": "1", "module": "results", "kind": "question",
+                 "quote": "Recorded env calls", "body": "Where do these come from?", "author": "carol", "role": "human",
+                 "created": "2026-10-27T00:00:00Z"}
+            req = urllib.request.Request(f"{base}/ask", data=json.dumps({"rows": [q], "thread": "c_q1"}).encode(), headers=hdr, method="POST")
+            with urllib.request.urlopen(req) as r:
+                job = json.loads(r.read())["job"]
+            for _ in range(100):
+                with urllib.request.urlopen(urllib.request.Request(f"{base}/ask/{job}", headers=hdr)) as r:
+                    st = json.loads(r.read())
+                if st["status"] in ("done", "error"):
+                    break
+                time.sleep(0.05)
+            self.assertEqual(st["status"], "done", st)
+            self.assertIn("> Recorded env calls", st["reply"]["body"])
+            self.assertIn("carol (human): Where do these come from?", st["reply"]["body"])
+            csv_text = (self.root / "projects/demo/benchmark/v001/comments.csv").read_text()
+            self.assertIn("c_q1", csv_text)
+            self.assertIn(st["reply"]["id"], csv_text)
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(f"{base}/ask/{job}")  # no X-AgentLedger header
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 class ServerTests(unittest.TestCase):
