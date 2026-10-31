@@ -1,4 +1,5 @@
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -538,6 +539,60 @@ class OnboardingTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run("demo", "--dir", str(other), "--no-serve")
         self.assertTrue((other / "keep.txt").exists())
+
+
+class PrivacyTests(unittest.TestCase):
+    """Nothing machine-specific (checkout paths, home directory) ends up in committed store files."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.home = self.tmp / "home" / "alice"
+        self.home.mkdir(parents=True)
+        self.saved = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+        self.root = init_store(self.tmp / "store", name="P")
+        self.store = Store(self.root)
+
+    def tearDown(self):
+        os.environ["HOME"] = self.saved
+        shutil.rmtree(self.tmp)
+
+    def committed_text(self) -> str:
+        return "\n".join(f.read_text(errors="replace") for f in (self.root / "projects").rglob("*") if f.is_file() and f.suffix != ".gz")
+
+    def test_local_paths_stay_in_the_ignored_cache(self):
+        repo = self.home / "code" / "proj"
+        repo.mkdir(parents=True)
+        trace = self.home / "session.jsonl"
+        trace.write_text(json.dumps({"cwd": str(repo), "note": f"read {self.home}/notes.txt and /home/alicex/y"}) + "\n")
+        self.store.publish("p/r", DEMO / "dna-primer.md", traces=[trace],
+                           context={"repo": "git@github.com:me/proj.git", "path": str(repo), "branch": "main", "commit": "abc1234"},
+                           session={"agent": "claude", "id": "11111111-2222-3333-4444-555555555555", "cwd": str(repo)})
+        build(self.store)
+        self.assertNotIn(str(self.home), self.committed_text())
+        meta = json.loads((self.root / "projects/p/r/v001/meta.json").read_text())
+        self.assertEqual(meta["context"], {"repo": "git@github.com:me/proj.git", "branch": "main", "commit": "abc1234"})
+        self.assertEqual(meta["session"], {"agent": "claude", "id": "11111111-2222-3333-4444-555555555555"})
+        self.assertEqual(self.store.local_info("p/r", 1), {"repo_path": str(repo), "session_cwd": str(repo)})
+        self.assertIn(".cache/", (self.root / ".gitignore").read_text())
+        stored = gzip.decompress((self.root / "projects/p/r/v001/traces/session.jsonl.gz").read_bytes()).decode()
+        self.assertIn('"cwd": "~/code/proj"', stored)
+        self.assertIn("read ~/notes.txt", stored)
+        self.assertIn("/home/alicex/y", stored)  # only whole path components are rewritten
+        self.assertEqual(run("--store", str(self.root), "check")[1].count("home directory"), 0)
+
+    def test_answers_cite_relative_paths(self):
+        from agentledger.ask import scrub_paths
+        repo = self.home / "code" / "proj"
+        text = f"See {self.root}/projects/p/r/v001/report.md:5 and {repo}/src/x.py:40 and {self.home}/notes.txt"
+        self.assertEqual(scrub_paths(text, self.root, repo),
+                         "See projects/p/r/v001/report.md:5 and src/x.py:40 and ~/notes.txt")
+
+    def test_check_flags_a_leaked_path(self):
+        self.store.publish("p/r", DEMO / "dna-primer.md")
+        self.store.add_comment("p/r", f"log at {self.home}/run.log", author="me")
+        code, out = run("--store", str(self.root), "check")
+        self.assertIn("comments.csv: contains a path under your home directory", out)
 
 
 class ServerTests(unittest.TestCase):

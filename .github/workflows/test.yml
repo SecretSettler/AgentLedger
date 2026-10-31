@@ -6,12 +6,13 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python: ["3.9", "3.13"]
+        # 3.9 is the oldest supported Python. actions/setup-python has no 3.9 build for current Ubuntu
+        # runners, so every version comes from uv's standalone builds, which exist for any runner image.
+        python: ["3.9", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
-      - run: node --check agentledger/assets/core.js && node --check agentledger/assets/viewer.js && node --check agentledger/assets/dashboard.js
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --no-project --python ${{ matrix.python }} python -m unittest discover -s tests -v
+      - run: for f in agentledger/assets/*.js; do node --check "$f"; done

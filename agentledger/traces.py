@@ -119,9 +119,47 @@ def session_transcript(session: dict) -> Optional[Path]:
     return None
 
 
+def _redactions() -> list[tuple["re.Pattern[bytes]", bytes]]:
+    home = str(Path.home()).rstrip("/")
+    if len(home) <= 1:
+        return []
+    # Only whole path components: /home/al must not touch /home/alice.
+    return [(re.compile(re.escape(home.encode()) + rb"(?=[/\\\"'\s:,;)\]}]|$)"), b"~")]
+
+
+def _copy_redacted(fin, fout, pairs: list) -> None:
+    """Copy a text trace line by line with the home directory replaced by ``~``; binary files untouched."""
+    head = fin.read(8192)
+    if not pairs or b"\x00" in head:
+        fout.write(head)
+        shutil.copyfileobj(fin, fout)
+        return
+    for line in _lines(head, fin):
+        for pattern, new in pairs:
+            line = pattern.sub(new, line)
+        fout.write(line)
+
+
+def _lines(head: bytes, fin):
+    """Whole lines, read in 1 MB chunks, so a path is never split across a replacement boundary."""
+    buf = head
+    while True:
+        cut = buf.rfind(b"\n")
+        if cut >= 0:
+            yield buf[: cut + 1]
+            buf = buf[cut + 1:]
+        chunk = fin.read(1 << 20)
+        if not chunk:
+            break
+        buf += chunk
+    if buf:
+        yield buf
+
+
 def attach(vdir: Path, sources: list[Path]) -> list[dict]:
-    """Copy traces into ``vdir/traces`` (gzip-compressed); return their metadata."""
+    """Copy traces into ``vdir/traces`` (gzip-compressed, home directory shown as ``~``); return their metadata."""
     out = []
+    pairs = _redactions()
     tdir = vdir / TRACES_DIR
     for src in sources:
         src = Path(src)
@@ -131,11 +169,12 @@ def attach(vdir: Path, sources: list[Path]) -> list[dict]:
             dest = tdir / (rel + ("" if rel.endswith(".gz") else ".gz"))
             dest.parent.mkdir(parents=True, exist_ok=True)
             if f.suffix == ".gz":
-                shutil.copy2(f, dest)
+                with gzip.open(f, "rb") as fin, gzip.open(dest, "wb", compresslevel=6) as fout:
+                    _copy_redacted(fin, fout, pairs)
             else:
                 with f.open("rb") as fin, gzip.open(dest, "wb", compresslevel=6) as fout:
-                    shutil.copyfileobj(fin, fout)
-            out.append({"path": dest.relative_to(vdir).as_posix(), "source": str(f), "bytes": f.stat().st_size})
+                    _copy_redacted(fin, fout, pairs)
+            out.append({"path": dest.relative_to(vdir).as_posix(), "bytes": f.stat().st_size})
     return out
 
 

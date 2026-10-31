@@ -172,8 +172,10 @@ def cmd_publish(args) -> int:
     if v.meta.get("context"):
         c = v.meta["context"]
         print(f"  about:  {c['repo']} @ {c['commit']}{' (uncommitted changes)' if c.get('dirty') else ''}")
+    for src in traces:
+        print(f"  trace:  {src}")
     for t in v.meta.get("traces", []):
-        print(f"  trace:  {t['path']}  ({human_size(t['bytes'])} from {t['source']})")
+        print(f"          → {t['path']}  ({human_size(t['bytes'])}, home directory shown as ~)")
     if v.meta.get("session"):
         print(f"  session: {v.meta['session']['agent']} {v.meta['session']['id']}  (Ask in the page continues this session)")
     if v.meta.get("resolves"):
@@ -422,6 +424,15 @@ def cmd_check(args) -> int:
                     errors.append(f"{store.rel(child)}: version folder directly under a project; it belongs in a report folder")
                 else:
                     walk_report(child, f"{pdir.name}/{child.name}")
+    home = str(Path.home()).rstrip("/")
+    if len(home) > 1 and base.is_dir():
+        pattern = re.compile(re.escape(home) + r"(?=[/\\\"'\s:,;)\]}]|$)")
+        for f in sorted(base.rglob("*")):
+            if f.is_file() and f.suffix in (".json", ".csv", ".md", ".html"):
+                text = f.read_text(encoding="utf-8", errors="replace")
+                if pattern.search(text):
+                    warnings.append(f"{store.rel(f)}: contains a path under your home directory ({home}); "
+                                    "edit it out before sharing the store")
     try:
         ids = {}
         for row in store.comments():

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -33,7 +34,7 @@ from typing import Callable, Optional
 from . import comments as cm
 from .build import build
 from .store import LedgerError, Store, now_iso, read_json, source_line, write_json
-from .traces import CACHE_DIR, human_size, session_transcript, unpacked
+from .traces import CACHE_DIR, human_size, session_info, session_transcript, unpacked
 
 CLAUDE_ARGV = [
     "claude", "-p", "--output-format", "stream-json", "--verbose",
@@ -137,7 +138,7 @@ def plan(store: Store, root: dict, default: Optional[Backend], choice: str = "au
             continue
         if session_transcript(s) is None:
             continue  # written on another machine
-        return Plan(agent_backend(s["agent"]), s["id"], s["agent"] == "claude", _dir(s.get("cwd")),
+        return Plan(agent_backend(s["agent"]), s["id"], s["agent"] == "claude", session_cwd(store, report.id, v.number, s),
                     f"resuming the {s['agent']} session that wrote v{v.number}")
     if default is None:
         raise AskError("no agent to ask: install Claude Code or Codex, or start serve with --ask-cmd")
@@ -148,6 +149,30 @@ def _dir(path: Optional[str]) -> Optional[Path]:
     return Path(path) if path and Path(path).is_dir() else None
 
 
+def repo_checkout(store: Store, report_id: str, number: int) -> Optional[Path]:
+    """Where the repository a version describes is checked out on this machine (local cache only)."""
+    local = store.local_info(report_id, number).get("repo_path")
+    legacy = (store.report(report_id).version(number).meta.get("context") or {}).get("path")  # stores from 0.2.0
+    return _dir(local) or _dir(legacy)
+
+
+def session_cwd(store: Store, report_id: str, number: int, session: dict) -> Optional[Path]:
+    local = store.local_info(report_id, number).get("session_cwd") or session.get("cwd")
+    if not local:
+        t = session_transcript(session)
+        local = (session_info(t) or {}).get("cwd") if t else None
+    return _dir(local)
+
+
+def scrub_paths(text: str, store_root: Path, repo_path: Optional[Path]) -> str:
+    """Make paths in an answer relative (to the store or the repo) and show the home directory as ``~``."""
+    roots = [(str(store_root), "")] + ([(str(repo_path), "")] if repo_path else []) + [(str(Path.home()), "~/")]
+    for root, short in sorted(roots, key=lambda r: -len(r[0])):
+        if len(root) > 1:
+            text = re.sub(re.escape(root.rstrip("/")) + r"/", lambda _: short, text)
+    return text
+
+
 # ------------------------------------------------------------------ prompt
 def build_prompt(store: Store, cid: str, resumed: bool = False) -> tuple[str, Path]:
     """Return (prompt, working directory) for answering thread ``cid``."""
@@ -155,8 +180,8 @@ def build_prompt(store: Store, cid: str, resumed: bool = False) -> tuple[str, Pa
     report = store.report(root["report"])
     v = report.version(int(root["version"]))
     ctx = v.meta.get("context") or {}
-    repo_path = Path(ctx["path"]) if ctx.get("path") else None
-    cwd = repo_path if repo_path and repo_path.is_dir() else store.root
+    repo_path = repo_checkout(store, report.id, v.number)
+    cwd = repo_path or store.root
 
     lines = [
         ("A reviewer is asking about the report you published earlier in this session. Answer from evidence."
@@ -198,6 +223,8 @@ def build_prompt(store: Store, cid: str, resumed: bool = False) -> tuple[str, Pa
         "- If the report is wrong or unsupported, say so plainly and give the corrected statement.",
         "- If the evidence is not there, say what is missing instead of guessing.",
         "- Be concise: a short paragraph or a few bullets. Answer in the language the reviewer used.",
+        "- Cite files relative to the store or the repository (projects/…/report.md:12, src/x.py:40), never as absolute paths:"
+        " the answer is saved into a shared repo.",
         "- Do not modify any files.",
     ]
     return "\n".join(lines) + "\n", cwd
@@ -384,6 +411,7 @@ def answer_thread(store: Store, cid: str, backend: Optional[Backend], *, choice:
         prompt, cwd = build_prompt(store, cid)
         answer, session = run_backend(fresh, prompt, cwd, store.root, on_progress, timeout)
         run_dir = cwd
+    answer = scrub_paths(answer, store.root, repo_checkout(store, root["report"], int(root["version"])))
     ts = now_iso()
     row = cm.normalize({
         "id": cm.new_id(), "reply_to": root["id"], "report": root["report"], "version": root["version"],

@@ -422,6 +422,10 @@ class Store:
             "resolves": list(resolves),
             "source": src_name,
         }
+        # Paths on this machine stay out of the repo: they go to the git-ignored local cache.
+        context = dict(context or {})
+        session = dict(session or {})
+        local = {k: v for k, v in (("repo_path", context.pop("path", None)), ("session_cwd", session.pop("cwd", None))) if v}
         if context:
             meta["context"] = context
         if trace_meta:
@@ -432,6 +436,8 @@ class Store:
             meta["allow_scripts"] = True
         write_json(vdir / "meta.json", meta)
         cm.write(vdir / "comments.csv", [])
+        if local:
+            self.remember_local("/".join(parse_report_id(report_id)), number, local)
 
         info = read_json(rdir / "report.json")
         if doc_title:
@@ -449,6 +455,20 @@ class Store:
         for cid in resolves:
             self.set_status(cid, "resolved", resolved_in=number)
         return self.report(report_id).version(number)
+
+    # ------------------------------------------------------ local state
+    # Facts that only hold on this machine (where the repo is checked out, where a session ran) live in
+    # .cache/local.json, which init git-ignores, so the store never commits anyone's paths.
+    def _local_file(self) -> Path:
+        return self.root / ".cache" / "local.json"
+
+    def local_info(self, report_id: str, number: int) -> dict:
+        return read_json(self._local_file()).get(f"{report_id}@v{number}", {})
+
+    def remember_local(self, report_id: str, number: int, info: dict) -> None:
+        data = read_json(self._local_file())
+        data.setdefault(f"{report_id}@v{number}", {}).update(info)
+        write_json(self._local_file(), data)
 
     # --------------------------------------------------------- comments
     def comments(self, report: Optional[Report] = None) -> list[dict]:
