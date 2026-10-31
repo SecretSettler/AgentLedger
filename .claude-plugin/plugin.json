@@ -1,0 +1,19 @@
+{
+  "name": "agentledger",
+  "version": "0.2.0",
+  "description": "Publish every report into your private AgentLedger store; review it in the browser; ask the agent that wrote it.",
+  "author": {
+    "name": "SecretSettler"
+  },
+  "homepage": "https://github.com/SecretSettler/AgentLedger",
+  "repository": "https://github.com/SecretSettler/AgentLedger",
+  "license": "Apache-2.0",
+  "keywords": [
+    "reports",
+    "review",
+    "audit",
+    "traces",
+    "comments"
+  ],
+  "icon": ".claude-plugin/icon.png"
+}

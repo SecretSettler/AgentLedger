@@ -35,6 +35,7 @@
   search.addEventListener('input', () => { state.q = search.value.trim().toLowerCase(); render(); });
   app.replaceChildren(h('div.al-dash', null,
     h('header.al-dash-head', null,
+      AL.logo(56, '.al-dash-logo'),
       h('div', null, h('h1', null, D.store.name), h('p', null, 'Agent reports, their versions and the review threads on them.')),
       h('div.al-spacer'), AL.theme.button()),
     statsBox,

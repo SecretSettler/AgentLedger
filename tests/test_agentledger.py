@@ -1,4 +1,5 @@
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -25,7 +26,7 @@ from agentledger.server import serve
 from agentledger.traces import detect_session
 from agentledger.store import LedgerError, Store, init_store
 
-DEMO = Path(__file__).resolve().parent.parent / "examples" / "demo"
+DEMO = Path(__file__).resolve().parent.parent / "agentledger" / "demo"
 
 
 def run(*argv) -> tuple[int, str]:
@@ -237,6 +238,7 @@ class AutomationTests(unittest.TestCase):
     def test_repo_skill_matches_packaged_skill(self):
         top = Path(__file__).resolve().parent.parent
         self.assertEqual((top / "skills/agentledger/SKILL.md").read_text(), (top / "agentledger/assets/SKILL.md").read_text())
+        self.assertEqual((top / "docs/logo.svg").read_text(), (top / "agentledger/assets/logo.svg").read_text())
 
     def test_publish_records_context_and_sync_pushes(self):
         remote = self.tmp / "remote.git"
@@ -308,7 +310,12 @@ class AskTests(unittest.TestCase):
         self.assertIn("traces/session.jsonl.gz", (self.root / "projects/demo/benchmark/v002/index.html").read_text())
 
     def test_print_prompt_and_cli_ask(self):
-        code, out = run("--store", str(self.root), "ask", "c_demo1", "--print-prompt")
+        saved_path = os.environ["PATH"]
+        os.environ["PATH"] = str(self.tmp)  # no claude or codex, as on CI: printing the prompt must not need one
+        try:
+            code, out = run("--store", str(self.root), "ask", "c_demo1", "--print-prompt")
+        finally:
+            os.environ["PATH"] = saved_path
         self.assertEqual(code, 0)
         self.assertIn("> Harness out tok", out)
         self.assertIn(".cache/projects/demo/benchmark/v001/traces/session.jsonl", out)
@@ -383,6 +390,214 @@ class AskTests(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_ARGV_LOG"], "a") as f:
+    f.write(json.dumps(argv) + "\\n")
+prompt = sys.stdin.read()
+if "--resume" in argv and os.environ.get("FAKE_FAIL_RESUME"):
+    print("Error: session is busy", file=sys.stderr)
+    sys.exit(1)
+sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--resume") + 1]
+print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}))
+print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/x/report.md"}}]}}))
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": sid,
+                  "result": "fake claude answer" + (" (resumed)" if "--resume" in argv else "")}))
+"""
+
+
+class SessionAskTests(unittest.TestCase):
+    """Ask continues the session that wrote the report: forked once per thread, then continued."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = {k: os.environ.get(k) for k in ("PATH", "CLAUDE_CONFIG_DIR", "FAKE_ARGV_LOG", "FAKE_FAIL_RESUME")}
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "claude").write_text(FAKE_CLAUDE)
+        (bin_dir / "claude").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
+        os.environ["FAKE_ARGV_LOG"] = str(self.tmp / "argv.log")
+        os.environ.pop("FAKE_FAIL_RESUME", None)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self.sid = "11111111-2222-3333-4444-555555555555"
+        tdir = self.tmp / "claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.repo))
+        tdir.mkdir(parents=True)
+        (tdir / f"{self.sid}.jsonl").write_text(json.dumps({"sessionId": self.sid, "cwd": str(self.repo)}) + "\n")
+        self.root = init_store(self.tmp / "store", name="S")
+        self.store = Store(self.root)
+        self.store.publish("p/r", DEMO / "dna-primer.md", session={"agent": "claude", "id": self.sid, "cwd": str(self.repo)})
+        self.cid = self.store.add_comment("p/r", "why?", module="outcome", author="carol")["id"]
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp)
+
+    def argv_log(self):
+        return [json.loads(ln) for ln in (self.tmp / "argv.log").read_text().splitlines()]
+
+    def test_session_info_from_transcript(self):
+        from agentledger.traces import session_info
+        t = next((self.tmp / "claude" / "projects").rglob("*.jsonl"))
+        self.assertEqual(session_info(t), {"agent": "claude", "id": self.sid, "cwd": str(self.repo)})
+
+    def test_fork_then_continue(self):
+        from agentledger.ask import answer_thread, thread_session
+        backend = resolve_backend("auto")
+        row = answer_thread(self.store, self.cid, backend)
+        self.assertEqual((row["body"], row["author"]), ("fake claude answer (resumed)", "claude"))
+        first = self.argv_log()[-1]
+        self.assertEqual(first[first.index("--resume") + 1], self.sid)
+        self.assertIn("--fork-session", first)
+        fork = first[first.index("--session-id") + 1]
+        self.assertNotEqual(fork, self.sid)
+        self.assertIn("Read", first)
+        self.assertIn("Bash", first[first.index("--disallowedTools"):])
+        self.assertEqual(thread_session(self.store, self.cid)["id"], fork)
+        self.store.reply(self.cid, "and then?", author="carol", role="human")
+        answer_thread(self.store, self.cid, backend)
+        second = self.argv_log()[-1]
+        self.assertEqual(second[second.index("--resume") + 1], fork)
+        self.assertNotIn("--fork-session", second)
+        self.assertNotIn("--session-id", second)
+
+    def test_falls_back_to_fresh_session(self):
+        from agentledger.ask import answer_thread
+        os.environ["FAKE_FAIL_RESUME"] = "1"
+        progress = []
+        row = answer_thread(self.store, self.cid, resolve_backend("auto"), on_progress=progress.append)
+        self.assertEqual(row["body"], "fake claude answer")
+        self.assertNotIn("--resume", self.argv_log()[-1])
+        self.assertTrue(any("could not resume" in p for p in progress))
+
+    def test_shared_server_keeps_ask_local(self):
+        backend = resolve_backend("auto")
+        httpd = serve(self.store, port=0, quiet=True, backend=backend, share=True)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+        def call(path, host, data=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method="POST" if data else "GET",
+                                         headers={"Host": host, "X-AgentLedger": "1", "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        try:
+            status, ping = call("/__agentledger/ping", "192.168.1.20")
+            self.assertEqual((status, ping["shared"], ping["ask"]), (200, True, None))
+            body = json.dumps({"thread": self.cid}).encode()
+            self.assertEqual(call("/__agentledger/ask", "192.168.1.20", body)[0], 403)
+            self.assertEqual(call("/__agentledger/ping", "evil.example")[0], 403)  # DNS rebinding
+            row = {"id": "c_lan", "report": "p/r", "version": "1", "body": "from LAN", "author": "dan", "created": "2026-10-31T00:00:00Z"}
+            self.assertEqual(call("/__agentledger/comments", "192.168.1.20", json.dumps({"rows": [row]}).encode())[0], 200)
+            self.assertEqual(call("/__agentledger/ping", "localhost")[1]["ask"], "claude")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class OnboardingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+
+    def tearDown(self):
+        if self.saved is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self.saved
+        shutil.rmtree(self.tmp)
+
+    def test_setup_creates_a_store_and_status_reports_it(self):
+        target = self.tmp / "ledger"
+        code, out = run("setup", str(target), "--skills-dir", str(self.tmp / "skills"))
+        self.assertEqual(code, 0, out)
+        self.assertTrue((target / "agentledger.json").exists())
+        self.assertIn("--private", out)
+        code, out = run()
+        self.assertIn(str(target), out)
+        busy = self.tmp / "busy"
+        busy.mkdir()
+        (busy / "x.txt").write_text("x")
+        self.assertEqual(run("setup", str(busy), "--skills-dir", str(self.tmp / "skills"))[0], 2)
+
+    def test_demo_builds_and_refuses_foreign_dirs(self):
+        code, out = run("demo", "--dir", str(self.tmp / "demo"), "--no-serve")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.tmp / "demo/projects/demo/benchmark/v002/index.html").exists())
+        self.assertEqual(run("demo", "--dir", str(self.tmp / "demo"), "--no-serve")[0], 0)  # rebuilds its own
+        other = self.tmp / "mine"
+        other.mkdir()
+        (other / "keep.txt").write_text("keep")
+        with self.assertRaises(SystemExit):
+            run("demo", "--dir", str(other), "--no-serve")
+        self.assertTrue((other / "keep.txt").exists())
+
+
+class PrivacyTests(unittest.TestCase):
+    """Nothing machine-specific (checkout paths, home directory) ends up in committed store files."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.home = self.tmp / "home" / "alice"
+        self.home.mkdir(parents=True)
+        self.saved = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+        self.root = init_store(self.tmp / "store", name="P")
+        self.store = Store(self.root)
+
+    def tearDown(self):
+        os.environ["HOME"] = self.saved
+        shutil.rmtree(self.tmp)
+
+    def committed_text(self) -> str:
+        return "\n".join(f.read_text(errors="replace") for f in (self.root / "projects").rglob("*") if f.is_file() and f.suffix != ".gz")
+
+    def test_local_paths_stay_in_the_ignored_cache(self):
+        repo = self.home / "code" / "proj"
+        repo.mkdir(parents=True)
+        trace = self.home / "session.jsonl"
+        trace.write_text(json.dumps({"cwd": str(repo), "note": f"read {self.home}/notes.txt and /home/alicex/y"}) + "\n")
+        self.store.publish("p/r", DEMO / "dna-primer.md", traces=[trace],
+                           context={"repo": "git@github.com:me/proj.git", "path": str(repo), "branch": "main", "commit": "abc1234"},
+                           session={"agent": "claude", "id": "11111111-2222-3333-4444-555555555555", "cwd": str(repo)})
+        build(self.store)
+        self.assertNotIn(str(self.home), self.committed_text())
+        meta = json.loads((self.root / "projects/p/r/v001/meta.json").read_text())
+        self.assertEqual(meta["context"], {"repo": "git@github.com:me/proj.git", "branch": "main", "commit": "abc1234"})
+        self.assertEqual(meta["session"], {"agent": "claude", "id": "11111111-2222-3333-4444-555555555555"})
+        self.assertEqual(self.store.local_info("p/r", 1), {"repo_path": str(repo), "session_cwd": str(repo)})
+        self.assertIn(".cache/", (self.root / ".gitignore").read_text())
+        stored = gzip.decompress((self.root / "projects/p/r/v001/traces/session.jsonl.gz").read_bytes()).decode()
+        self.assertIn('"cwd": "~/code/proj"', stored)
+        self.assertIn("read ~/notes.txt", stored)
+        self.assertIn("/home/alicex/y", stored)  # only whole path components are rewritten
+        self.assertEqual(run("--store", str(self.root), "check")[1].count("home directory"), 0)
+
+    def test_answers_cite_relative_paths(self):
+        from agentledger.ask import scrub_paths
+        repo = self.home / "code" / "proj"
+        text = f"See {self.root}/projects/p/r/v001/report.md:5 and {repo}/src/x.py:40 and {self.home}/notes.txt"
+        self.assertEqual(scrub_paths(text, self.root, repo),
+                         "See projects/p/r/v001/report.md:5 and src/x.py:40 and ~/notes.txt")
+
+    def test_check_flags_a_leaked_path(self):
+        self.store.publish("p/r", DEMO / "dna-primer.md")
+        self.store.add_comment("p/r", f"log at {self.home}/run.log", author="me")
+        code, out = run("--store", str(self.root), "check")
+        self.assertIn("comments.csv: contains a path under your home directory", out)
 
 
 class ServerTests(unittest.TestCase):

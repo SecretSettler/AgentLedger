@@ -1,6 +1,7 @@
 /* AgentLedger — dashboard. */
 .al-dash { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
-.al-dash-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 22px; }
+.al-dash-head { display: flex; align-items: center; gap: 16px; margin-bottom: 22px; }
+.al-dash-logo { flex: none; border-radius: 13px; }
 .al-dash-head h1 { margin: 0; font-family: var(--al-serif); font-size: 34px; line-height: 1.15; letter-spacing: -.01em; }
 .al-dash-head p { margin: 6px 0 0; color: var(--al-muted); font-size: 14px; }
 .al-dash-head .al-spacer { flex: 1; }
