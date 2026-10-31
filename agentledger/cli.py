@@ -574,10 +574,13 @@ def cmd_ask(args) -> int:
     store = open_store(args)
     if args.print_prompt:
         root, _ = thread_of(store, args.id)
-        how = plan(store, root, resolve_backend(args.backend, args.cmd), args.backend)
-        prompt, cwd = build_prompt(store, args.id, resumed=bool(how.resume))
-        print(f"# {how.backend.name}" + (f", {how.note} ({how.resume})" if how.note else "") + f"; working directory {how.cwd or cwd}",
-              file=sys.stderr)
+        try:
+            how = plan(store, root, resolve_backend(args.backend, args.cmd), args.backend)
+        except AskError:
+            how = None  # no agent installed: show what a fresh run would get
+        prompt, cwd = build_prompt(store, args.id, resumed=bool(how and how.resume))
+        who = (how.backend.name + (f", {how.note} ({how.resume})" if how.note else "")) if how else "no agent installed"
+        print(f"# {who}; working directory {(how and how.cwd) or cwd}", file=sys.stderr)
         sys.stdout.write(prompt)
         return 0
     backend = resolve_backend(args.backend, args.cmd)

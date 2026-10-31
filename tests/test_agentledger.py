@@ -310,7 +310,12 @@ class AskTests(unittest.TestCase):
         self.assertIn("traces/session.jsonl.gz", (self.root / "projects/demo/benchmark/v002/index.html").read_text())
 
     def test_print_prompt_and_cli_ask(self):
-        code, out = run("--store", str(self.root), "ask", "c_demo1", "--print-prompt")
+        saved_path = os.environ["PATH"]
+        os.environ["PATH"] = str(self.tmp)  # no claude or codex, as on CI: printing the prompt must not need one
+        try:
+            code, out = run("--store", str(self.root), "ask", "c_demo1", "--print-prompt")
+        finally:
+            os.environ["PATH"] = saved_path
         self.assertEqual(code, 0)
         self.assertIn("> Harness out tok", out)
         self.assertIn(".cache/projects/demo/benchmark/v001/traces/session.jsonl", out)
