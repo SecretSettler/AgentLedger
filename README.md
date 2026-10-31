@@ -1,203 +1,259 @@
-# AgentLedger
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/banner-dark.png">
+    <img alt="AgentLedger" src="docs/images/banner-light.png" width="720">
+  </picture>
+</p>
 
-Agent writes a report → you comment on it in the browser → the agent answers and publishes v2. Every report is modular, versioned and filed in one place.
+<p align="center"><b>Filed by your agent. Reviewed by you. Answered by the session that wrote it.</b></p>
 
-## Use it in Claude Code or Codex
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#reviewing">Reviewing</a> ·
+  <a href="#guide">Guide</a> ·
+  <a href="#reference">Reference</a>
+</p>
 
-This repo is only the tool. Your reports live in **your own store**, a git repo you keep private.
+<p align="center">
+  <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-2d5fd3">
+  <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-1d7f55">
+  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-1f1e1b">
+  <img alt="Codex skill" src="https://img.shields.io/badge/Codex-skill-1f1e1b">
+  <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-77736a">
+</p>
 
-```sh
-pip install "git+https://github.com/SecretSettler/AgentLedger"
-agentledger setup ~/path/to/your-store      # a local clone of your private store repo
-```
+Agents now produce long write-ups: benchmark comparisons, audits, investigations. Reviewing them means scrolling a
+wall of text, losing track of what changed between drafts, and asking follow-up questions in a chat that has long
+forgotten how the numbers were made.
 
-No store yet: `agentledger init ~/my-ledger --repo YOU/my-ledger`, then push that folder to a new **private** GitHub repo.
+AgentLedger files every report your agent writes into **your own private git store**, renders it as a page you can
+annotate, and sends your questions **back to the session that wrote it**, so the answer comes from the agent's memory
+of the work and from its trace, not from a fresh guess.
 
-`setup` remembers where the store is and copies the skill, [`skills/agentledger/SKILL.md`](skills/agentledger/SKILL.md), to
-`~/.claude/skills/agentledger/` (Claude Code) and `~/.agents/skills/agentledger/` (Codex). Restart the agent, then just ask, in any repo:
+<p align="center">
+  <img alt="Select a passage, press Ask, and the agent answers in the thread" src="docs/images/demo.gif" width="900"><br>
+  <sub>Select a passage → <b>Ask</b> → the agent that wrote the report answers in the thread. (Demo data.)</sub>
+</p>
 
-- "write this up as a report" / "把这个分析写成报告"
-- "address the review comments on harness-vs-paper" / "处理 harness-vs-paper 上的评论"
-
-The agent publishes into `projects/<repo>/<topic>/vNNN/`, pushes the store, and replies with the link.
-
-To review: open `index.html` in the store (or run `agentledger serve` in it and open http://localhost:8765), select text, press **Comment**, then **Save**.
-
-## Ask the agent about any passage
-
-Select text in a report and press **Ask** (or `a`). Your question, the quoted passage and the thread so far become the
-prompt; the report source, the repository it describes (at the recorded commit's checkout) and the **traces** attached
-at publish time are the context. The answer streams into the thread and is saved as an agent reply, so follow-ups
-(**Reply & ask**) continue the same conversation.
-
-```sh
-agentledger serve                 # Ask uses `claude` if installed, else `codex`
-agentledger serve --ask codex     # or pick one; --ask-cmd "<cmd>" for anything that reads a prompt on stdin
-agentledger ask <comment-id>      # the same from the terminal; --print-prompt shows exactly what the agent gets
-```
-
-The agent runs on your machine under your own Claude Code or Codex login, read-only: Claude Code with only
-Read/Grep/Glob, Codex with `--sandbox read-only`. What it reads goes to that model provider exactly as in your usual
-agent sessions; AgentLedger itself sends nothing anywhere.
-
-Traces come from `publish --trace`: `auto` attaches the transcript of the Claude Code or Codex session that is publishing,
-and any path attaches logs or data. They are stored gzip-compressed in `vNNN/traces/` and listed at the end of the report.
-
-<details><summary>Without <code>setup</code></summary>
-
-Copy `skills/agentledger` into `~/.claude/skills/` or `~/.agents/skills/` (older Codex versions: `~/.codex/skills/`),
-and `export AGENTLEDGER_STORE=~/path/to/your-store` in your shell profile.
-</details>
-
-## Private stores
-
-- Nothing goes anywhere but your own repo. Pages load no external scripts, fonts or images; the only network call a page makes is
-  **Save to GitHub**, which writes `comments.csv` to your repo with your token (a fine-grained token works for private repos).
-  `agentledger sync` pushes with your normal git credentials. **Ask** goes to `agentledger serve` on your machine, which runs
-  your own agent CLI (see above).
-- To read and review: open `index.html` in your clone, or run `agentledger serve` there
-  (on a remote machine: `ssh -L 8765:localhost:8765 host`, then http://localhost:8765). GitHub also renders each `report.md`.
-- Don't use githack, and don't turn on GitHub Pages: both serve the files publicly.
-
-## What it does
-
-1. An agent publishes a Markdown report with `agentledger publish`. Every `##` section becomes a module, the file lands in a fixed folder (`projects/<project>/<report>/v001/`), and a self-contained HTML page is generated next to it. The page records which repo and commit the report describes.
-2. You read it in the browser, select any sentence or table cell, and press **Comment**, as in a doc review. Comments carry the quoted text, the module and the version they were made on.
-3. Save the comments to the store (local server or GitHub), or **Export CSV** and hand the file over.
-4. The agent runs `agentledger comments list`, investigates each thread, replies in place, and publishes **v2**. Changed and new modules are flagged, and resolved threads point at the version that settled them.
-5. The dashboard tracks every project, report, version and open thread.
-
-No dependencies: the CLI is pure Python 3.9+ and every page is a single HTML file that works from `file://`, `agentledger serve`, or after an `scp` (and from a static host if the store is public).
-
-## New store
+## Quick start
 
 ```sh
-agentledger init my-ledger --name "My ledger" --repo OWNER/my-ledger   # --repo enables "Save to GitHub"
+curl -fsSL https://raw.githubusercontent.com/SecretSettler/AgentLedger/main/install.sh | sh
 ```
 
-To try the UI on sample data: `sh examples/build-demo.sh` (the numbers in it are made up).
+That installs the CLI, creates a private store at `~/agentledger-store` (or links yours: `... | sh -s -- ~/my-store-clone`)
+and installs the skill for **Claude Code** and **Codex**. Then, in any repository, just ask your agent:
 
-## Store layout
+> write this up as a report
 
-The store is a plain folder, usually its own git repository. The CLI is the only thing that writes into `projects/`, so the hierarchy stays the same everywhere:
-
-```
-my-ledger/
-  agentledger.json                 store config: name, GitHub repo/branch for comment saves
-  index.html                       dashboard                       (generated)
-  manifest.json                    machine-readable index           (generated)
-  projects/
-    <project>/                     a project, e.g. oneswe
-      project.json                 title, description
-      <report>/                    one topic: what the report is about
-        report.json                title, about, tags, status
-        index.html                 redirects to the latest version  (generated)
-        v001/
-          report.md                the source the agent published
-          meta.json                author, date, summary, what changed, which threads it resolves
-          comments.csv             review threads opened on this version
-          index.html               the report page                  (generated)
-          img/ data/ ...           assets the report references (carried into later versions)
-        v002/
-        <sub-report>/              same shape, nested under its parent report
-```
-
-- Names are lowercase slugs (`a-z`, `0-9`, `-`); `v001`-style names and `assets`, `index`, `projects` are reserved.
-- A report id is its path under `projects/`: `oneswe/harness-vs-paper/dna-primer`.
-- `agentledger check` reports stray files and malformed folders; `agentledger tree` prints the hierarchy.
-
-## Reviewing in the browser
-
-| | |
-|---|---|
-| **Comment** | Select text and press the **Comment** button that appears, or use the comment icon on a module heading. Pick a kind (question, issue, suggestion, note, praise). |
-| **Review comments panel** | Your name, **Export CSV**, **Copy CSV**, **Import CSV**, **Copy for agent** (a Markdown brief you can paste into Claude Code or Slack), **Clear** (drop unsaved local edits). Filter open / resolved / all, this version or all versions. Each thread has go, reply, resolve/reopen, edit and delete. |
-| **Saving** | Under `agentledger serve` the button reads **Save to store** and writes `comments.csv` on disk. On any other host with `--repo` configured it reads **Save to GitHub** and commits the merged CSV through the GitHub API with a fine-grained token (Contents: read and write). Otherwise comments stay in the browser until you export them. |
-| **Timeline rail** (left) | The report as a vertical timeline: one node per module, ticks for sub-sections, badges for open threads. Drag the knob to scrub through the report. |
-| **Navigator pad** (bottom right) | Click the round stick to open it; drag it up or down to scroll like a joystick. Inside: the version chain (click a circle to open that version at the same module), parent and sub-reports, and a minimap you can drag. |
-| **Project map** (`m`) | Every report in the project with its version chain. |
-| **Versions** | Modules that changed or are new since the previous version are marked; older versions show a banner linking to the latest. |
-
-Shortcuts: `j`/`k` modules, `[`/`]` versions, `c` comment, `p` comments panel, `m` map, `n` pad, `d` dashboard, `?` help.
-
-Comments made in the browser live in `localStorage` until saved, so nothing is lost on reload. The dashboard also shows them, flagged as unsaved.
-
-## The agent loop
+and review it:
 
 ```sh
-git pull                                              # if comments were saved to GitHub
-agentledger comments import review.csv                # if they arrived as an exported CSV ('-' reads stdin)
-agentledger comments list                             # open threads as Markdown, with source file:line
-agentledger comments list --status waiting            # only threads whose last word is not the agent's
-agentledger comments reply c_mvq0z4 "The column counts re-emitted source; see Token accounting." --resolve
-agentledger draft oneswe/harness-vs-paper -o draft.md # copy the latest source to edit
-agentledger publish oneswe/harness-vs-paper draft.md --changes "Explained the token gap" --resolves c_mvq0z4,c_mvq1a2
-git add -A && git commit -m "harness-vs-paper v2" && git push
+agentledger open        # http://localhost:8765, comment on any line, Ask about any passage
 ```
 
-`agentledger sync [-m message]` pulls, rebuilds, commits and pushes the store in one step.
+When you've commented, tell the agent *"handle the review comments on harness-vs-paper"*. It answers each thread,
+publishes v2 with the fixes, and marks what it resolved.
 
-## Writing reports
+Want to look around first? `agentledger demo` builds a sample store and opens it.
 
-- `# Title` on the first line (or `title:` in front matter). Optional front matter: `title`, `summary`, `about`, `tags`, `author`, `changes`.
-- Every `## Heading` starts a module. Pin ids so comments and change tracking survive renames: `## Results {#results}`. Add a status badge: `## Results {#results status=needs-review}`.
-- `###` headings become ticks on the rail.
-- GitHub-flavoured Markdown: tables with alignment, task lists, fenced code, block quotes, images, raw HTML such as `<details>` or inline SVG.
-- Publish a folder instead of a file to write one module per file: top-level `.md` files are concatenated in name order and everything else is copied as assets.
-- Sub-reports: publish to a longer id, e.g. `agentledger publish oneswe/harness-vs-paper/dna-primer dna.md`.
-- HTML reports work too (`report.html`); top-level `<h2>`s become modules.
+## Install
 
-## Commands
+### 1. Let your agent do it
+
+Paste this into Claude Code or Codex:
+
+> Install AgentLedger from https://github.com/SecretSettler/AgentLedger: run
+> `curl -fsSL https://raw.githubusercontent.com/SecretSettler/AgentLedger/main/install.sh | sh`
+> (append `-s -- <path>` if I already have a store clone), make sure `agentledger` is on my PATH,
+> then run `agentledger demo --no-open` and tell me the URL.
+
+### 2. Claude Code plugin
+
+```text
+/plugin marketplace add SecretSettler/AgentLedger
+/plugin install agentledger@agentledger
+```
+
+On Claude Code 2.1.275 or later, one step does both: `/plugin install agentledger --marketplace SecretSettler/AgentLedger`.
+The plugin adds the skill plus `/agentledger:report`, `/agentledger:review` and `/agentledger:open`; on first use the
+skill offers to install the CLI.
+
+### 3. Codex
+
+`install.sh` (or `agentledger setup`) places the skill in `~/.agents/skills/agentledger/`, where Codex picks it up.
+Older Codex versions read `~/.codex/skills/`; copy [`skills/agentledger`](skills/agentledger) there.
+
+### 4. By hand
+
+```sh
+pipx install git+https://github.com/SecretSettler/AgentLedger    # or: pip install --user ...
+agentledger setup [path-to-your-store-clone]                      # creates ~/agentledger-store if you have none
+```
+
+**Keep the store private.** It holds your reports and the transcripts behind them. A new one is a local git repo; give
+it a private remote, e.g. `gh repo create my-agent-ledger --private --source ~/agentledger-store --push`.
+
+## How it works
+
+<p align="center"><img alt="How AgentLedger works" src="docs/images/how-it-works.png" width="900"></p>
+
+1. **Publish.** The agent writes Markdown and runs `agentledger publish <repo>/<topic> draft.md --trace auto`. The CLI
+   files it as the next version (`v001`, `v002`, …), records the repo, branch and commit it describes, attaches the
+   transcript of the session that wrote it (gzipped), and remembers that session's id.
+2. **Review.** `agentledger open` serves the store on `localhost` and opens the report. Every `##` section is a module
+   you can comment on, link to and compare across versions.
+3. **Comment.** Select any text and press **Comment**. Comments are saved into the version's `comments.csv`, through
+   the local server, the GitHub API, or an exported CSV.
+4. **Ask.** Select text and press **Ask**. Your question, the quote and the thread become the prompt. The session that
+   wrote the report answers, read-only: Claude Code resumes a fork of it (`--resume --fork-session`, so your original
+   session is untouched), Codex resumes it in place (`codex exec resume`). Each thread keeps its own continuation, so
+   follow-ups remember the conversation. Without the session, a fresh read-only run answers from the trace.
+5. **Revise.** The agent runs `agentledger comments list --status waiting`, replies in place, and publishes the next
+   version with `--resolves`. Changed modules are flagged; resolved threads point at the version that fixed them.
+
+Who can do what:
+
+| | On the machine serving it (`agentledger open`) | Shared (`serve --share`, a static copy) |
+|---|:---:|:---:|
+| Read, navigate versions and sub-reports | ✓ | ✓ |
+| Comment | ✓ | ✓ |
+| Ask the agent | ✓ | |
+
+A teammate with their own clone runs `agentledger open` on their machine and asks their own agent, which answers from
+the report's traces (the original session only exists where it ran).
+
+The store is a plain git repo with one fixed layout. Only the CLI writes into `projects/`, and `agentledger check`
+flags anything out of place:
+
+```
+~/agentledger-store/
+  agentledger.json, index.html (dashboard), manifest.json
+  projects/<project>/<report>/
+    v001/  report.md · meta.json · comments.csv · traces/ · index.html
+    v002/
+    <sub-report>/v001/ …
+```
+
+## Reviewing
+
+<table>
+  <tr>
+    <td width="50%"><img alt="A report with the timeline rail and the navigator pad" src="docs/images/report.png"></td>
+    <td width="50%"><img alt="An answered Ask thread in the review panel" src="docs/images/ask-answer.png"></td>
+  </tr>
+  <tr>
+    <td><b>Report.</b> Modules flagged <i>changed since v1</i>; the timeline rail on the left (drag its knob to scrub); the navigator pad with versions, sub-reports and a minimap.</td>
+    <td><b>Review panel.</b> Threads anchored to the quoted text, agent answers inline, Export / Import / Copy CSV, <i>Copy for agent</i>.</td>
+  </tr>
+  <tr>
+    <td><img alt="The dashboard" src="docs/images/dashboard.png"></td>
+    <td><img alt="The project map" src="docs/images/map.png"></td>
+  </tr>
+  <tr>
+    <td><b>Dashboard.</b> Every project and report with its version chain, open threads, threads waiting on the agent, activity.</td>
+    <td><b>Project map</b> (<kbd>m</kbd>). Every report in the project; each circle is a version.</td>
+  </tr>
+</table>
+
+- **Comment / Ask:** select text, or use the icon on a module heading. Threads have go, reply, **Reply & ask**, resolve,
+  edit and delete.
+- **Navigate without scrolling:** the rail is the report as a vertical timeline; the round stick at the bottom right
+  is a joystick (drag up or down to scroll, click to open the pad); the version chain opens any version at the same module.
+- **Shortcuts:** <kbd>j</kbd>/<kbd>k</kbd> modules, <kbd>[</kbd>/<kbd>]</kbd> versions, <kbd>c</kbd> comment,
+  <kbd>a</kbd> ask, <kbd>p</kbd> panel, <kbd>m</kbd> map, <kbd>n</kbd> pad, <kbd>d</kbd> dashboard, <kbd>?</kbd> help.
+- Dark mode follows your system (or the toggle in the top bar). Unsaved comments live in the browser until saved.
+
+## Guide
+
+### Writing reports
+
+The skill tells the agent all of this; it's here for when you write one yourself (`agentledger template` prints a skeleton).
+
+- `# Title` first; front matter `summary:` (the answer in one or two sentences), `about:`, `tags:`.
+- One `##` per module with a stable id, `## Results {#results}`, so comments and change tracking follow it across
+  versions. Flag modules for a human check with `## Results {#results status=needs-review}`.
+- Evidence next to every claim. Images and data: `--asset <path>`; they carry over to later versions.
+- Sub-reports: publish to a longer id, `agentledger publish repo/topic/part part.md`.
+- Traces: `--trace auto` attaches the publishing session's transcript; `--trace <path>` attaches any log or folder.
+
+### Asking
+
+- `agentledger open` (or `serve`) enables Ask when `claude` or `codex` is installed. The report's own session is used
+  when its transcript is on this machine; otherwise `--ask claude|codex` picks the agent, and `--ask-cmd "<cmd>"` plugs
+  in anything that reads a prompt on stdin and prints an answer.
+- From the terminal: `agentledger ask <comment-id>`. `--print-prompt` shows exactly what the agent receives.
+- Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
+
+### Sharing
+
+- **Same network:** `agentledger serve --share` lets teammates read and comment at `http://<your-ip>:8765`.
+- **Remote machine:** `ssh -L 8765:localhost:8765 <host>`, then open `http://localhost:8765` (Ask works through the tunnel).
+- **Through GitHub:** teammates clone the private store and run `agentledger open`; their comments come back with
+  `agentledger sync`. Pages opened from disk can also **Save to GitHub** with a fine-grained token (Contents: read and
+  write), or **Export CSV** for `agentledger comments import`.
+
+### Privacy and security
+
+- Nothing goes anywhere but your own repo. Pages load no external scripts, fonts or images. The only network call a
+  page makes is Save to GitHub; Ask runs your own agent CLI, which sends what it reads to its model provider as usual.
+- Ask is read-only (Claude Code with only Read/Grep/Glob; Codex with `--sandbox read-only`) and only served to requests
+  from the machine itself; `--share` exposes reading and commenting, never Ask. Shared mode accepts IP addresses and this
+  machine's names only, which blocks DNS rebinding.
+- Report HTML passes an allow-list sanitiser (no scripts, handlers, frames, forms or `javascript:` URLs); `--allow-scripts`
+  skips it for reports you fully trust.
+- Don't publish a store through githack or GitHub Pages: both make the files public.
+
+## Reference
 
 | Command | |
 |---|---|
-| `init [dir] --name --repo --branch` | Create a store |
-| `publish <id> <file\|folder>` | New report or new version; records the git repo and commit it ran in. `--trace auto\|PATH --title --summary --about --author --changes --resolves --asset --tag --allow-scripts --no-carry --no-context` |
-| `build` | Regenerate every page, the dashboard and `manifest.json` (writes only what changed) |
-| `serve [--port --host --allow-host --open --ask --ask-cmd]` | Local server; the browser saves comments into the store and can Ask the agent |
-| `ask <comment-id> [--backend --cmd --print-prompt]` | Have the agent answer a review thread |
-| `sync [-m msg] [--no-pull --no-push]` | Pull, rebuild, commit and push the store |
-| `setup <store>` | Remember the store; install the skill for Claude Code and Codex |
-| `root` | Print the store folder |
-| `tree`, `check` | Show the hierarchy; validate the layout |
-| `draft <id> [-o file] [--version N]` | Copy a version's source to a working file |
-| `template` | Print a report skeleton |
-| `set <id> --title --about --status --tag --order` | Edit report metadata |
-| `project <id> --title --description` | Create or edit a project |
-| `path <id> [--source\|--comments\|--view]` | Print where a version lives |
-| `comments list [id] [--status open\|waiting\|closed\|all] [--format md\|json\|csv] [-r]` | Threads, for agents |
-| `comments add / reply / resolve / reopen / wontfix` | Work threads from the CLI |
-| `comments import <csv\|->`, `comments export [id] [-o file]` | Move threads between browser and store |
+| `agentledger` | Where your store is, what is waiting on you, what to run next |
+| `setup [path]` | One-time setup: link or create the store; install the skill for Claude Code and Codex |
+| `open [report-id]` | Serve on this machine and open the dashboard or a report (`--share`, `--ask`, `--port`) |
+| `demo` | Build a sample store and open it (`--ask claude` to try a real agent) |
+| `publish <id> <file\|folder>` | New report or new version (`--trace auto\|PATH --summary --about --changes --resolves --asset --tag`) |
+| `sync [-m msg]` | Pull, rebuild, commit and push the store |
+| `ask <comment-id>` | Have the agent answer a thread (`--backend`, `--cmd`, `--print-prompt`) |
+| `comments list [id]` | Threads for agents (`--status open\|waiting\|closed\|all`, `--format md\|json\|csv`) |
+| `comments reply / add / resolve / reopen / wontfix` | Work threads from the CLI |
+| `comments import <csv\|->` / `export` | Move threads between browser and store |
+| `serve` | Like `open` without opening a browser |
+| `tree`, `check`, `root` | List reports, validate the layout, print the store path |
+| `draft <id> [-o file]` | Copy the latest source to edit |
+| `template`, `set`, `project`, `path`, `build`, `init` | Skeleton, metadata, paths, rebuild, new empty store |
 
-The store is `--store`, else `$AGENTLEDGER_STORE`, else the nearest `agentledger.json` above the current directory, else the one `setup` remembered (`~/.config/agentledger/config.json`). `$AGENTLEDGER_AUTHOR` sets the default author.
+The store is `--store`, else `$AGENTLEDGER_STORE`, else the nearest `agentledger.json` above the current directory,
+else the one `setup` remembered (`~/.config/agentledger/config.json`).
 
-## Comment CSV
+<details><summary>Comment CSV schema</summary>
 
-One schema everywhere (browser export, `comments.csv`, CLI):
+One schema everywhere (browser export, `comments.csv`, CLI). Rows merge by `id`, newest `updated` wins; deletions are
+tombstones.
 
 | Column | |
 |---|---|
-| `id` | `c_` + time + random |
-| `reply_to` | root thread id for replies, empty for a thread |
-| `report`, `version` | where the thread was opened |
-| `module` | module id the quote is in |
+| `id`, `reply_to` | thread or reply id; replies point at their thread |
+| `report`, `version`, `module` | where it was opened |
 | `kind` | question, issue, suggestion, note, praise |
-| `quote`, `prefix`, `suffix` | the selected text and 40 characters either side, used to re-anchor it |
+| `quote`, `prefix`, `suffix` | the selected text and 40 characters either side, used to re-anchor it in later versions |
 | `body`, `author`, `role` | the message; `role` is `human` or `agent` |
-| `status` | `open`, `resolved`, `wontfix`, or `deleted` (a tombstone) on thread roots |
-| `created`, `updated` | ISO 8601 UTC; on merge the newest `updated` wins |
-| `resolved_in` | the version that resolved it |
-
-## Security notes
-
-- Report HTML is passed through an allow-list sanitiser: no scripts, event handlers, frames, forms or `javascript:` URLs. Publish with `--allow-scripts` only for reports you fully trust.
-- The GitHub token is kept in memory unless you tick "remember". Pages on shared origins (githack serves everyone's pages from one origin) can read each other's `localStorage`, so don't remember it there.
-- `agentledger serve` binds to `127.0.0.1` and only accepts saves with an `X-AgentLedger` header from an allowed `Host`, which blocks cross-site posts and DNS rebinding. Use `ssh -L 8765:localhost:8765 host` to review a remote store.
+| `status`, `resolved_in` | `open`, `resolved`, `wontfix` or `deleted`; the version that resolved it |
+| `created`, `updated` | ISO 8601 UTC |
+</details>
 
 ## Development
 
 ```sh
+git clone https://github.com/SecretSettler/AgentLedger && cd AgentLedger
+pip install -e .
 python -m unittest discover -s tests -v
+agentledger demo
 ```
 
-Front-end code lives in `agentledger/assets/` (plain CSS and JS, no build step) and is inlined into every generated page.
+The CLI is plain Python with no dependencies; the pages are plain CSS and JS in `agentledger/assets/`, inlined into
+every generated page, with no build step. `claude plugin validate .` checks the plugin manifests.
+
+Apache-2.0.

@@ -12,6 +12,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from urllib.parse import quote
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +47,11 @@ def href(target: Path, start: Path) -> str:
 
 def esc(text) -> str:
     return html.escape(str(text or ""), quote=True)
+
+
+def favicon() -> str:
+    svg = re.sub(r">\s+<", "><", asset("logo.svg").strip())
+    return "data:image/svg+xml," + quote(svg, safe=" =:/;,'-.()")  # '#' must be escaped: it would start a fragment
 
 
 def inline_md(text: str) -> str:
@@ -242,6 +248,7 @@ class Builder:
             "crumbs": crumbs,
         }
         return fill(asset("report.html"), {
+            "FAVICON": favicon(),
             "TITLE": esc(f"{cur.title} · v{v.number}"),
             "CSS": asset("common.css") + asset("viewer.css"),
             "JS": asset("core.js") + asset("viewer.js"),
@@ -375,6 +382,7 @@ class Builder:
         rows = [row for p in self.store.projects() for r in p.walk() for row in self.report_comments(r)]
         data = {"app": __version__, "store": self.store_info(root), "projects": projects, "comments": cm.sort_rows(rows)}
         return fill(asset("dashboard.html"), {
+            "FAVICON": favicon(),
             "TITLE": esc(self.store.name),
             "CSS": asset("common.css") + asset("dashboard.css"),
             "JS": asset("core.js") + asset("dashboard.js"),

@@ -8,8 +8,10 @@ description: Publish every report, write-up, analysis, audit, investigation, ben
 Reports live in the ledger store, a git repo that `agentledger root` prints. Never leave a report only in chat, and
 never write report files into the repository you are working in. Only the `agentledger` CLI writes into the store.
 
-If `agentledger` is missing or says no store is configured, tell the user to run
-`pip install git+https://github.com/SecretSettler/AgentLedger` and `agentledger setup <path-to-store-clone>`, then stop.
+If `agentledger` is not on PATH, offer to install it, and with the user's OK run
+`curl -fsSL https://raw.githubusercontent.com/SecretSettler/AgentLedger/main/install.sh | sh`
+(it installs the CLI and runs `agentledger setup`, which creates a private store at `~/agentledger-store`;
+if the user already has a store clone, append `-s -- <path>`). If it says no store is configured, run `agentledger setup`.
 
 ## Writing a report
 
@@ -32,6 +34,7 @@ If `agentledger` is missing or says no store is configured, tell the user to run
    (for a revision add `--changes "<what changed>"`).
 5. `agentledger sync -m "<id> vN: <short title>"` commits and pushes the store.
 6. Answer in chat with a short summary of the findings, the version, and the `github:` link publish printed.
+   Mention that `agentledger open <id>` opens it for review, where any passage can be commented on or asked about.
 
 ## Working through review comments
 

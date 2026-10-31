@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="AgentLedger">
+  <rect width="128" height="128" rx="28" fill="#1f1e1b"/>
+  <rect x="24" y="20" width="62" height="86" rx="9" fill="#faf9f5"/>
+  <rect x="34" y="33" width="38" height="5" rx="2.5" fill="#d2cdc1"/>
+  <rect x="31" y="44" width="48" height="11" rx="3" fill="#fcebb0"/>
+  <rect x="34" y="47" width="42" height="5" rx="2.5" fill="#e7b416"/>
+  <rect x="34" y="61" width="26" height="5" rx="2.5" fill="#d2cdc1"/>
+  <line x1="41.5" y1="83.6" x2="46.5" y2="85.4" stroke="#1f1e1b" stroke-width="2" stroke-linecap="round"/>
+  <line x1="54.5" y1="88.1" x2="59.5" y2="89.9" stroke="#1f1e1b" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="37" cy="82" r="4.5" fill="#7d8f5c"/>
+  <circle cx="50.5" cy="86.75" r="4.5" fill="#4f6b46"/>
+  <circle cx="64" cy="91.5" r="4.5" fill="#5b84c4"/>
+  <path d="M93 49c11.6 0 21 8.7 21 19.5S104.6 88 93 88c-2.6 0-5.1-.4-7.4-1.2L76 92l2.6-8.6C74.5 79.9 72 74.5 72 68.5 72 57.7 81.4 49 93 49z" fill="#2d5fd3" stroke="#1f1e1b" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M93 57.5l2.6 7.4 7.4 2.6-7.4 2.6L93 77.5l-2.6-7.4-7.4-2.6 7.4-2.6z" fill="#faf9f5"/>
+</svg>

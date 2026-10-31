@@ -347,6 +347,7 @@ class Store:
         carry_assets: bool = True,
         context: dict | None = None,
         traces: tuple[Path, ...] | list[Path] = (),
+        session: dict | None = None,
     ) -> Version:
         source = Path(source)
         if not source.exists():
@@ -425,6 +426,8 @@ class Store:
             meta["context"] = context
         if trace_meta:
             meta["traces"] = trace_meta
+        if session:
+            meta["session"] = session
         if allow_scripts:
             meta["allow_scripts"] = True
         write_json(vdir / "meta.json", meta)

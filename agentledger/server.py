@@ -14,7 +14,9 @@ accepted, which blocks cross-site form posts and DNS-rebinding.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 import threading
 from functools import partial
 from typing import Optional
@@ -26,7 +28,13 @@ from .ask import AskService, Backend
 from .build import build
 from .store import LedgerError, Store
 
+LOOPBACK_NAMES = {"localhost", "127.0.0.1", "[::1]"}
 MAX_BODY = 4 * 1024 * 1024
+
+
+def machine_names() -> set[str]:
+    names = {socket.gethostname().lower(), socket.getfqdn().lower()}
+    return names | {n.split(".")[0] for n in names} | {n + ".local" for n in names if "." not in n}
 MAX_FIELD = 50_000
 
 
@@ -34,9 +42,10 @@ class LedgerHandler(SimpleHTTPRequestHandler):
     server_version = f"agentledger/{__version__}"
 
     def __init__(self, *args, store: Store, hosts: set[str], lock: threading.Lock, quiet: bool,
-                 ask: Optional[AskService] = None, **kwargs):
+                 ask: Optional[AskService] = None, share: bool = False, **kwargs):
         self.store = store
         self.hosts = hosts
+        self.share = share
         self.lock = lock
         self.quiet = quiet
         self.ask = ask
@@ -60,12 +69,38 @@ class LedgerHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _host_ok(self) -> bool:
+    def _local_client(self) -> bool:
+        try:
+            ip = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            return False
+        return ip.is_loopback or bool(getattr(ip, "ipv4_mapped", None) and ip.ipv4_mapped.is_loopback)
+
+    def _ask(self) -> Optional[AskService]:
+        """Ask runs the owner's agent: only for this machine (or an SSH tunnel to it), addressed as localhost."""
+        if not self.ask or not self._local_client() or self._host_name() not in LOOPBACK_NAMES:
+            return None
+        return self.ask
+
+    def _host_name(self) -> str:
         host = (self.headers.get("Host") or "").strip().lower()
         name = host.rsplit(":", 1)[0] if not host.endswith("]") else host
         if name.startswith("[") and "]" in name:
             name = name[: name.index("]") + 1]
-        return name in self.hosts
+        return name
+
+    def _host_ok(self) -> bool:
+        name = self._host_name()
+        if name in self.hosts:
+            return True
+        if self.share:
+            # Teammates reach a shared server by IP or by this machine's name; other names could be DNS rebinding.
+            try:
+                ipaddress.ip_address(name.strip("[]"))
+                return True
+            except ValueError:
+                return name in machine_names()
+        return False
 
     def _guard(self) -> bool:
         """Same-origin requests only: allowed Host, custom header, matching Origin."""
@@ -119,12 +154,14 @@ class LedgerHandler(SimpleHTTPRequestHandler):
         if path == "/__agentledger/ping":
             if not self._host_ok():
                 return self._json(403, {"ok": False, "error": "host not allowed"})
+            ask = self._ask()
             return self._json(200, {"ok": True, "agentledger": __version__, "store": self.store.name,
-                                    "ask": self.ask.backend.name if self.ask else None})
+                                    "ask": ask.name if ask else None, "shared": self.share,
+                                    "local": self._local_client()})
         if path.startswith("/__agentledger/ask/"):
             if not self._guard():
                 return None
-            job = self.ask.get(path.rsplit("/", 1)[-1]) if self.ask else None
+            job = self._ask().get(path.rsplit("/", 1)[-1]) if self._ask() else None
             return self._json(200, {"ok": True, **job}) if job else self._json(404, {"ok": False, "error": "no such job"})
         return super().do_GET()
 
@@ -134,6 +171,8 @@ class LedgerHandler(SimpleHTTPRequestHandler):
             return self._json(404, {"ok": False, "error": "not found"})
         if not self._guard():
             return None
+        if path == "/__agentledger/ask" and self.ask and not self._ask():
+            return self._json(403, {"ok": False, "error": "Ask only works on the machine running agentledger (open it as localhost); shared viewers can comment"})
         payload = self._payload()
         if payload is None:
             return None
@@ -149,19 +188,20 @@ class LedgerHandler(SimpleHTTPRequestHandler):
             thread = str(payload.get("thread") or "")
             job = self.ask.start(thread)
             if not self.quiet:
-                self.log_message("ask %s on %s (job %s)", self.ask.backend.name, thread, job.id)
-            return self._json(200, {"ok": True, "job": job.id, "backend": self.ask.backend.name, "rows": merged})
+                self.log_message("ask on %s (job %s)", thread, job.id)
+            return self._json(200, {"ok": True, "job": job.id, "backend": job.backend, "rows": merged})
         except LedgerError as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
 
 
 def serve(store: Store, host: str = "127.0.0.1", port: int = 8765, extra_hosts: tuple[str, ...] = (), quiet: bool = False,
-          backend: Optional[Backend] = None, ask_timeout: float = 900):
-    hosts = {"localhost", "127.0.0.1", "[::1]", *(h.lower() for h in extra_hosts)}
+          backend: Optional[Backend] = None, ask_timeout: float = 900, share: bool = False, ask_choice: str = "auto"):
+    """``share=True`` lets anyone who can reach the port read and comment; Ask stays local."""
+    hosts = {*LOOPBACK_NAMES, *(h.lower() for h in extra_hosts)}
     if host not in ("0.0.0.0", "::", ""):
         hosts.add(host.lower() if ":" not in host else f"[{host.lower()}]")
     lock = threading.Lock()
-    ask = AskService(store, backend, lock, timeout=ask_timeout) if backend else None
-    handler = partial(LedgerHandler, store=store, hosts=hosts, lock=lock, quiet=quiet, ask=ask)
+    ask = AskService(store, backend, lock, timeout=ask_timeout, choice=ask_choice) if backend else None
+    handler = partial(LedgerHandler, store=store, hosts=hosts, lock=lock, quiet=quiet, ask=ask, share=share)
     httpd = ThreadingHTTPServer((host, port), handler)
     return httpd

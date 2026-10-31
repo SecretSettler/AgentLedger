@@ -60,11 +60,63 @@ def _codex_candidates(cwd: Path) -> list[Path]:
 
 
 def detect_session(cwd: Optional[Path] = None) -> Optional[Path]:
-    """Transcript of the agent session running in ``cwd``: the most recently written one."""
+    """Transcript of the agent session running in ``cwd``: the one the agent names, else the newest."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid and UUID_RE.fullmatch(sid):
+        hits = list(_claude_projects().glob(f"*/{sid}.jsonl"))
+        if hits:
+            return hits[0]
     cwd = (cwd or Path.cwd()).resolve()
     now = time.time()
     found = [f for f in _claude_candidates(cwd) + _codex_candidates(cwd) if now - f.stat().st_mtime < RECENT]
     return max(found, key=lambda f: f.stat().st_mtime) if found else None
+
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def session_info(transcript: Path) -> Optional[dict]:
+    """``{"agent", "id", "cwd"}`` of the Claude Code or Codex session a transcript belongs to."""
+    path = Path(transcript).resolve()
+    try:
+        if _claude_projects().resolve() in path.parents:
+            sid, cwd = path.stem, ""
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh):
+                    if i > 500:
+                        break
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if d.get("cwd"):
+                        sid, cwd = d.get("sessionId") or sid, d["cwd"]
+                        break
+            return {"agent": "claude", "id": sid, "cwd": cwd}
+        if _codex_sessions().resolve() in path.parents:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                first = json.loads(fh.readline() or "{}")
+            payload = first.get("payload") or {}
+            found = UUID_RE.findall(path.stem)
+            sid = payload.get("id") or (found[-1] if found else "")
+            return {"agent": "codex", "id": sid, "cwd": payload.get("cwd") or first.get("cwd") or ""} if sid else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def session_transcript(session: dict) -> Optional[Path]:
+    """Where the session's transcript lives on this machine, if it does."""
+    sid = session.get("id") or ""
+    if not sid:
+        return None
+    if session.get("agent") == "claude":
+        hits = list(_claude_projects().glob(f"*/{sid}.jsonl"))
+        return hits[0] if hits else None
+    if session.get("agent") == "codex" and _codex_sessions().is_dir():
+        hits = list(_codex_sessions().rglob(f"rollout-*{sid}.jsonl"))
+        return hits[0] if hits else None
+    return None
 
 
 def attach(vdir: Path, sources: list[Path]) -> list[dict]:

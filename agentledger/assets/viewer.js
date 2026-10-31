@@ -28,7 +28,8 @@
     ui.countBadge = h('span.al-badge.is-zero', null, '0');
     const commentsBtn = h('button.al-btn', { type: 'button', title: 'Review comments (P)', onClick: () => togglePanel() },
       AL.iconEl('comment'), h('span.al-lbl', null, 'Comments'), ui.countBadge);
-    const bar = h('header.al-topbar', null, crumbs,
+    const brand = h('a.al-brand', { href: D.store.dashboard, title: `${D.store.name} — dashboard` }, AL.logo(24));
+    const bar = h('header.al-topbar', null, brand, crumbs,
       h('div.al-top-actions', null,
         h('button.al-verbtn', { type: 'button', title: 'Versions and related reports (M)', onClick: openMap },
           `v${V}`, h('span.al-muted', null, `/${D.versions.length}`)),
@@ -283,6 +284,7 @@
   function onSelection() {
     const cur = currentSelection();
     if (!cur) return hideSel();
+    selBtn.querySelector('.is-ask').hidden = !sync.askBackend;  // shared and static copies can only comment
     ui.pendingSel = cur.anchor;
     const rects = cur.range.getClientRects();
     const r = rects.length ? rects[rects.length - 1] : cur.range.getBoundingClientRect();
@@ -437,7 +439,7 @@
       h('div.al-thread-actions', null,
         btn('go', 'go', () => go(r.id), '.is-small', 'Scroll to the commented text'),
         btn('reply', 'reply', () => openReply(replyBox, r), '.is-small'),
-        ui.asking.has(r.id) ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
+        ui.asking.has(r.id) || !sync.askBackend ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
         r.status === 'open'
           ? btn('check', 'resolve', () => setStatus(r, 'resolved'), '.is-small')
           : btn('reopen', 'reopen', () => setStatus(r, 'open'), '.is-small'),
@@ -469,9 +471,9 @@
     };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send(); if (e.key === 'Escape') box.hidden = true; });
     box.replaceChildren(ta, h('div.al-composer-row', null, btn(null, 'Cancel', () => { box.hidden = true; }, '.is-small'),
-      btn('reply', 'Reply', send, '.is-small'),
-      btn('spark', 'Reply & ask', () => { if (!sync.askBackend) return askUnavailable(); if (send()) askAgent(root.id); }, '.is-small.is-primary',
-        `Send your reply and have ${askName()} answer it`)));
+      btn('reply', 'Reply', send, sync.askBackend ? '.is-small' : '.is-small.is-primary'),
+      sync.askBackend ? btn('spark', 'Reply & ask', () => { if (send()) askAgent(root.id); }, '.is-small.is-primary',
+        `Send your reply and have ${askName()} answer it`) : null));
     box.hidden = false;
     ta.focus();
   }
@@ -522,7 +524,7 @@
     renderPanel();
     try {
       const r = await sync.ask(rows, threadId);
-      ui.asking.get(threadId).job = r.job;
+      Object.assign(ui.asking.get(threadId), { job: r.job, backend: r.backend });
       comments.markSynced(rows);
       comments.addRemote((r.rows || []).filter((x) => x.report === D.report.id));
       pollAsk(threadId);
@@ -542,6 +544,7 @@
       }
       entry.progress = st.progress || [];
       entry.elapsed = st.elapsed;
+      entry.backend = st.backend || entry.backend;
       if (st.status === 'done') {
         ui.asking.delete(threadId);
         ui.focus = threadId;
@@ -566,7 +569,7 @@
         btn('reopen', 'try again', () => { ui.asking.delete(threadId); askAgent(threadId); }, '.is-small'));
     }
     return h('div.al-asking', { 'aria-live': 'polite' },
-      h('div.al-asking-h', null, h('span.al-spinner'), h('b', null, `${askName()} is working`), e.elapsed ? h('span.al-muted', null, `${e.elapsed}s`) : null),
+      h('div.al-asking-h', null, h('span.al-spinner'), h('b', null, `${e.backend || askName()} is working`), e.elapsed ? h('span.al-muted', null, `${e.elapsed}s`) : null),
       ...(e.progress || []).slice(-3).map((step) => h('div.al-asking-step', null, step)));
   }
   function updateAsking(threadId) {

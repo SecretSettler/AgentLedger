@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,8 +16,8 @@ from pathlib import Path
 from . import __version__
 from . import comments as cm
 from .build import build
-from .ask import AskError, answer_thread, build_prompt, resolve_backend
-from .traces import detect_session, human_size
+from .ask import AskError, answer_thread, build_prompt, plan, resolve_backend, thread_of
+from .traces import detect_session, human_size, session_info
 from .store import (
     CONFIG_NAME, GENERATED_OR_SOURCE, PROJECTS, SLUG_RE, VERSION_DIR_RE, LedgerError, Store, check_slug, source_line,
     find_root, init_store, read_json, user_config_path, write_json,
@@ -130,23 +131,26 @@ def git_context(cwd: Path, store: Store) -> dict | None:
     }
 
 
-def resolve_traces(values) -> list[Path]:
-    out = []
+def resolve_traces(values) -> tuple[list[Path], dict | None]:
+    """Trace paths to attach, and the agent session behind ``--trace auto`` (resumed later by Ask)."""
+    out, session = [], None
     for value in values or []:
         if value == "auto":
             found = detect_session(Path.cwd())
             if found:
                 out.append(found)
+                session = session_info(found)
             else:
                 print("note: --trace auto found no Claude Code or Codex session for this directory; publishing without it",
                       file=sys.stderr)
         else:
             out.append(Path(value).expanduser())
-    return out
+    return out, session
 
 
 def cmd_publish(args) -> int:
     store = open_store(args)
+    traces, session = resolve_traces(args.trace)
     v = store.publish(
         args.report, Path(args.source),
         title=args.title, summary=args.summary, about=args.about,
@@ -155,7 +159,7 @@ def cmd_publish(args) -> int:
         tags=split_ids(args.tag) if args.tag else None, allow_scripts=args.allow_scripts,
         carry_assets=not args.no_carry,
         context=None if args.no_context else git_context(Path.cwd(), store),
-        traces=resolve_traces(args.trace),
+        traces=traces, session=session,
     )
     if not args.no_build:
         rebuild(store, quiet=True)
@@ -170,6 +174,8 @@ def cmd_publish(args) -> int:
         print(f"  about:  {c['repo']} @ {c['commit']}{' (uncommitted changes)' if c.get('dirty') else ''}")
     for t in v.meta.get("traces", []):
         print(f"  trace:  {t['path']}  ({human_size(t['bytes'])} from {t['source']})")
+    if v.meta.get("session"):
+        print(f"  session: {v.meta['session']['agent']} {v.meta['session']['id']}  (Ask in the page continues this session)")
     if v.meta.get("resolves"):
         print(f"  resolved: {', '.join(v.meta['resolves'])}")
     if (store.root / ".git").exists():
@@ -223,11 +229,22 @@ def cmd_sync(args) -> int:
 SKILL_TARGETS = (("Claude Code", "~/.claude/skills"), ("Codex", "~/.agents/skills"))
 
 
+DEFAULT_STORE = Path("~/agentledger-store")
+
+
 def cmd_setup(args) -> int:
-    """Remember the store and install the skill for Claude Code and Codex."""
-    root = Path(args.store_path or args.store or ".").expanduser().resolve()
+    """Remember the store (creating a private one if needed) and install the skill for Claude Code and Codex."""
+    remembered = read_json(user_config_path()).get("store")
+    root = Path(args.store_path or args.store or remembered or DEFAULT_STORE).expanduser().resolve()
+    created = False
     if not (root / CONFIG_NAME).exists():
-        raise LedgerError(f"{root} is not a store (no {CONFIG_NAME}); clone your store repo first, or `agentledger init` one")
+        if root.exists() and any(p for p in root.iterdir() if p.name != ".git"):
+            raise LedgerError(f"{root} has files but no {CONFIG_NAME}; give an empty folder, an existing store, or nothing")
+        init_store(root, name=args.name or "Agent Ledger")
+        if shutil.which("git") and not (root / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=False)
+        build(Store(root))
+        created = True
     cfg = user_config_path()
     data = read_json(cfg)
     data["store"] = str(root)
@@ -241,7 +258,11 @@ def cmd_setup(args) -> int:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(skill, encoding="utf-8")
         print(f"skill:  {dest}  ({name})")
-    print("Restart Claude Code / Codex, then ask for a report, or to handle the comments on one.")
+    if created:
+        print(f"\nCreated a new store. Keep it private: push it to a private repo, e.g.\n"
+              f"  gh repo create my-agent-ledger --private --source {root} --push")
+    print("\nRestart Claude Code / Codex, then just ask: \"write this up as a report\", "
+          "or \"handle the review comments on <report>\".\nReview in the browser: agentledger open")
     if not shutil.which("agentledger"):
         print("warning: `agentledger` is not on PATH for this shell; the agent needs it there", file=sys.stderr)
     return 0
@@ -250,6 +271,59 @@ def cmd_setup(args) -> int:
 def cmd_root(args) -> int:
     print(open_store(args).root)
     return 0
+
+
+def cmd_status(args) -> int:
+    """What `agentledger` alone prints: where the store is and what to do next."""
+    print(f"AgentLedger {__version__} — review what your agents report")
+    try:
+        store = open_store(args)
+    except LedgerError:
+        print("\n  No store yet. One command sets everything up (a private store + the Claude Code / Codex skill):\n"
+              "    agentledger setup\n\n  Or look around first:\n    agentledger demo")
+        return 0
+    reports = store.reports()
+    threads = cm.threads(store.comments())
+    waiting = [t for t in threads if t["root"]["status"] == "open"
+               and not (t["replies"] and t["replies"][-1]["role"] == "agent")]
+    print(f"\n  store    {store.root}")
+    print(f"  reports  {len(reports)} in {len(store.projects())} project(s), "
+          f"{sum(len(r.versions) for r in reports)} version(s)")
+    print(f"  threads  {sum(1 for t in threads if t['root']['status'] == 'open')} open, {len(waiting)} waiting on the agent")
+    print("\n  agentledger open        review in the browser (comment, Ask)\n"
+          "  agentledger tree        list reports\n"
+          "  agentledger --help      everything else")
+    return 0
+
+
+def cmd_open(args) -> int:
+    """Serve the store on this machine and open it (a report's latest version, or the dashboard)."""
+    store = open_store(args)
+    if args.report:
+        report = store.report(args.report)
+        if not report.latest:
+            raise LedgerError(f"{report.id} has no versions yet")
+        args.path = store.rel(report.latest.view_path)
+    args.open = True
+    return cmd_serve(args)
+
+
+def cmd_demo(args) -> int:
+    from . import demo
+
+    target = Path(args.dir).expanduser() if args.dir else demo.default_dir()
+    store = demo.create(target)
+    print(f"demo store: {store.root}  (sample data; the numbers are made up)")
+    if args.no_serve:
+        return 0
+    args.store = str(store.root)
+    if args.ask == "demo":
+        args.ask, args.ask_cmd = "auto", f"{shlex.quote(sys.executable)} -m agentledger.demo"
+    else:
+        args.ask_cmd = None
+    args.path = "projects/demo/benchmark/v002/index.html"
+    args.open = not args.no_open
+    return cmd_serve(args)
 
 
 def cmd_build(args) -> int:
@@ -439,22 +513,41 @@ def cmd_path(args) -> int:
     return 0
 
 
+def lan_address() -> str:
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # no packet is sent; this just picks the outgoing interface
+            return s.getsockname()[0]
+    except OSError:
+        return socket.gethostname()
+
+
 def cmd_serve(args) -> int:
     from .server import serve
 
     store = open_store(args)
     rebuild(store, quiet=True)
     backend = resolve_backend(args.ask, args.ask_cmd)
-    httpd = serve(store, host=args.host, port=args.port, extra_hosts=tuple(args.allow_host or ()), quiet=args.quiet,
-                  backend=backend, ask_timeout=args.ask_timeout)
-    shown = "localhost" if args.host in ("127.0.0.1", "0.0.0.0", "::") else args.host
-    url = f"http://{shown}:{httpd.server_address[1]}/"
-    print(f"serving {store.root} at {url}  (Ctrl+C to stop)")
-    print("comments saved in the browser are written to the store and rebuilt")
-    if backend:
-        print(f"select text and press Ask: {backend.name} answers, read-only, from the report, its traces and repo")
+    host = args.host or ("0.0.0.0" if args.share else "127.0.0.1")
+    httpd = serve(store, host=host, port=args.port, extra_hosts=tuple(args.allow_host or ()), quiet=args.quiet,
+                  backend=backend, ask_timeout=args.ask_timeout, share=args.share,
+                  ask_choice=args.ask if not args.ask_cmd else "auto")
+    port = httpd.server_address[1]
+    url = f"http://localhost:{port}/" + (args.path or "")
+    print(f"AgentLedger · {store.name}")
+    print(f"  open    {url}")
+    if args.share:
+        print(f"  shared  http://{lan_address()}:{port}/   (anyone who can reach this can read and comment)")
+    if backend and backend.kind == "plain":
+        how = f"{backend.name} (only from this machine)"
+    elif backend:
+        how = f"the agent session that wrote each report, else {backend.name} (only from this machine)"
     else:
-        print("Ask is off (no `claude` or `codex` on PATH; see --ask / --ask-cmd)")
+        how = "off: no claude/codex on PATH (--ask, --ask-cmd)"
+    print(f"  ask     {how}")
+    print("  Ctrl+C to stop")
     if args.open:
         webbrowser.open(url)
     try:
@@ -469,15 +562,18 @@ def cmd_serve(args) -> int:
 def cmd_ask(args) -> int:
     store = open_store(args)
     if args.print_prompt:
-        prompt, cwd = build_prompt(store, args.id)
-        print(f"# working directory: {cwd}", file=sys.stderr)
+        root, _ = thread_of(store, args.id)
+        how = plan(store, root, resolve_backend(args.backend, args.cmd), args.backend)
+        prompt, cwd = build_prompt(store, args.id, resumed=bool(how.resume))
+        print(f"# {how.backend.name}" + (f", {how.note} ({how.resume})" if how.note else "") + f"; working directory {how.cwd or cwd}",
+              file=sys.stderr)
         sys.stdout.write(prompt)
         return 0
     backend = resolve_backend(args.backend, args.cmd)
     if backend is None:
         raise LedgerError("no agent to ask: install Claude Code (`claude`) or Codex (`codex`), or pass --cmd")
     try:
-        row = answer_thread(store, args.id, backend, timeout=args.timeout,
+        row = answer_thread(store, args.id, backend, choice=args.backend, timeout=args.timeout,
                             on_progress=lambda s: print(f"  … {s}", file=sys.stderr))
     except AskError as exc:
         raise LedgerError(str(exc)) from exc
@@ -615,8 +711,9 @@ def cmd_comments_export(args) -> int:
 def make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentledger", description="Modular, reviewable, versioned reports for AI agents.")
     p.add_argument("--version", action="version", version=f"agentledger {__version__}")
-    p.add_argument("--store", help="store root (default: nearest folder with agentledger.json, or $AGENTLEDGER_STORE)")
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    p.add_argument("--store", help="store root (default: $AGENTLEDGER_STORE, the nearest agentledger.json, or the one setup remembered)")
+    p.set_defaults(func=cmd_status)
+    sub = p.add_subparsers(dest="cmd", metavar="command")
 
     s = sub.add_parser("init", help="create a store")
     s.add_argument("dir", nargs="?", default=".")
@@ -651,8 +748,10 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-push", action="store_true")
     s.set_defaults(func=cmd_sync)
 
-    s = sub.add_parser("setup", help="remember the store and install the skill for Claude Code and Codex")
-    s.add_argument("store_path", nargs="?", help="path to the store clone (default: --store or the current directory)")
+    s = sub.add_parser("setup", help="one-time setup: a private store + the skill for Claude Code and Codex")
+    s.add_argument("store_path", nargs="?",
+                   help="your store's clone, or an empty folder for a new one (default: the remembered store, else ~/agentledger-store)")
+    s.add_argument("--name", help="display name when creating a new store")
     s.add_argument("--skills-dir", help=argparse.SUPPRESS)  # tests: install under one folder instead of ~/.claude and ~/.agents
     s.set_defaults(func=cmd_setup)
 
@@ -705,17 +804,34 @@ def make_parser() -> argparse.ArgumentParser:
     g.add_argument("--view", action="store_true")
     s.set_defaults(func=cmd_path)
 
-    s = sub.add_parser("serve", help="serve the store locally; the browser can save comments straight into it")
-    s.add_argument("--host", default="127.0.0.1")
-    s.add_argument("--port", type=int, default=8765)
-    s.add_argument("--allow-host", action="append", help="extra Host header to accept (e.g. a tunnel hostname)")
+    def serve_options(s, ask_choices=("auto", "claude", "codex", "off"), ask_default="auto"):
+        s.add_argument("--port", type=int, default=8765)
+        s.add_argument("--share", action="store_true",
+                       help="let others on your network read and comment; Ask stays available only on this machine")
+        s.add_argument("--host", help="interface to bind (default 127.0.0.1, or 0.0.0.0 with --share)")
+        s.add_argument("--allow-host", action="append", help="extra Host header to accept (e.g. a tunnel hostname)")
+        s.add_argument("--ask", default=ask_default, choices=list(ask_choices),
+                       help="agent that answers Ask (default: the one that wrote the report, else claude, else codex)")
+        s.add_argument("--ask-cmd", help="any command that reads a prompt on stdin and prints an answer, instead of claude/codex")
+        s.add_argument("--ask-timeout", type=float, default=900, help="seconds before an answer is abandoned")
+        s.add_argument("--quiet", action="store_true")
+
+    s = sub.add_parser("open", help="review in the browser: serve on this machine and open a report or the dashboard")
+    s.add_argument("report", nargs="?", help="report id (default: the dashboard)")
+    serve_options(s)
+    s.set_defaults(func=cmd_open, path=None)
+
+    s = sub.add_parser("demo", help="try it: build a sample store and open it in the browser")
+    s.add_argument("--dir", help="where to build it (default ~/.cache/agentledger/demo-store)")
+    s.add_argument("--no-open", action="store_true", help="don't open a browser")
+    s.add_argument("--no-serve", action="store_true", help="only build the store")
+    serve_options(s, ask_choices=("demo", "auto", "claude", "codex", "off"), ask_default="demo")
+    s.set_defaults(func=cmd_demo)
+
+    s = sub.add_parser("serve", help="serve the store; the browser saves comments into it and can Ask the agent")
     s.add_argument("--open", action="store_true", help="open the dashboard in a browser")
-    s.add_argument("--quiet", action="store_true")
-    s.add_argument("--ask", default="auto", choices=["auto", "claude", "codex", "off"],
-                   help="agent that answers Ask questions from the page (default: claude, else codex, if installed)")
-    s.add_argument("--ask-cmd", help="any command that reads a prompt on stdin and prints an answer, instead of claude/codex")
-    s.add_argument("--ask-timeout", type=float, default=900, help="seconds before an answer is abandoned")
-    s.set_defaults(func=cmd_serve)
+    serve_options(s)
+    s.set_defaults(func=cmd_serve, path=None)
 
     s = sub.add_parser("ask", help="have the agent answer a review thread (the same as Ask in the page)")
     s.add_argument("id", help="comment id")

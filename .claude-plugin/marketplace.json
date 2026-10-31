@@ -1,0 +1,17 @@
+{
+  "name": "agentledger",
+  "owner": {
+    "name": "SecretSettler"
+  },
+  "metadata": {
+    "description": "Modular, versioned agent reports you can comment on and ask questions about."
+  },
+  "plugins": [
+    {
+      "name": "agentledger",
+      "source": "./",
+      "description": "Publish every report into your private AgentLedger store; review it in the browser; ask the agent that wrote it.",
+      "version": "0.2.0"
+    }
+  ]
+}
