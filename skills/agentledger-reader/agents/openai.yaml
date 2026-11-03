@@ -1,0 +1,6 @@
+interface:
+  display_name: "AgentLedger Reader"
+  short_description: "Ask your own AI about reports and trace evidence"
+  default_prompt: "Use $agentledger-reader to open this report and answer my question from its original trace evidence."
+policy:
+  allow_implicit_invocation: true
