@@ -122,8 +122,9 @@ Who can do what:
 | Comment | ✓ | ✓ |
 | Ask the agent | ✓ | |
 
-A teammate with their own clone runs `agentledger open` on their machine and asks their own agent, which answers from
-the report's traces (the original session only exists where it ran).
+Someone else can also read a report **on their own machine and ask their own AI**: send them one report with
+`agentledger share` (below), or give them a clone of the store. Their agent answers from the report and its traces,
+since your original session only exists on your machine.
 
 The store is a plain git repo with one fixed layout. Only the CLI writes into `projects/`, and `agentledger check`
 flags anything out of place:
@@ -189,6 +190,25 @@ The skill tells the agent all of this; it's here for when you write one yourself
 
 ### Sharing
 
+**One report, to someone who should ask their own AI about it:**
+
+```sh
+agentledger share repo/topic                     # → repo-topic.agentledger.zip: every version, sub-reports, traces, threads
+# they run, on their machine:
+agentledger open repo-topic.agentledger.zip      # unpacks to ~/.cache/agentledger/shared/…, opens it; Comment and Ask work
+agentledger link repo/topic ~/code/repo          # optional: let their agent read their checkout of the code too
+agentledger --store <printed path> comments export repo/topic -o feedback.csv   # or Export CSV in the page
+# back on your machine:
+agentledger comments import feedback.csv         # their questions and their agent's answers join your threads
+```
+
+The file holds only that report: not the rest of your store, your local cache or your GitHub settings
+(`--no-traces` and `--no-comments` leave those out too). Traces are agent transcripts, with your home directory shown
+as `~`, so send them only to people you trust. When you share a newer version, they open the new file and keep their
+own comments. On their side every page is sanitised and the agent runs read-only inside the unpacked folder.
+
+**Everything else:**
+
 - **Same network:** `agentledger serve --share` lets teammates read and comment at `http://<your-ip>:8765`.
 - **Remote machine:** `ssh -L 8765:localhost:8765 <host>`, then open `http://localhost:8765` (Ask works through the tunnel).
 - **Through GitHub:** teammates clone the private store and run `agentledger open`; their comments come back with
@@ -223,7 +243,7 @@ them return to the page; unrelated private threads stay private. Agents review t
 |---|---|
 | `agentledger` | Where your store is, what is waiting on you, what to run next |
 | `setup [path]` | One-time setup: link or create the store; install the skill for Claude Code and Codex |
-| `open [report-id]` | Serve on this machine and open the dashboard or a report (`--share`, `--ask`, `--port`) |
+| `open [report-id \| file.agentledger.zip]` | Serve on this machine and open the dashboard, a report, or a shared report (`--share`, `--ask`, `--port`, `--into`) |
 | `demo` | Build a sample store and open it (`--ask claude` to try a real agent) |
 | `publish <id> <file\|folder>` | New report or new version (`--trace auto\|PATH --summary --about --changes --resolves --asset --tag`) |
 | `sync [-m msg]` | Pull, rebuild, commit and push the store |
@@ -231,6 +251,8 @@ them return to the page; unrelated private threads stay private. Agents review t
 | `comments list [id]` | Threads for agents (`--status open\|waiting\|closed\|all`, `--format md\|json\|csv`) |
 | `comments reply / add / resolve / reopen / wontfix` | Work threads from the CLI |
 | `comments import <csv\|->` / `export` | Move threads between browser and store |
+| `share <report-id> [-o file]` | Pack one report into a file someone else opens with `agentledger open <file>` (`--no-traces`, `--no-comments`) |
+| `link <report-id> <repo>` | Tell Ask where the code a report describes is checked out on this machine |
 | `serve` | Like `open` without opening a browser |
 | `tree`, `check`, `root` | List reports, validate the layout, print the store path |
 | `draft <id> [-o file]` | Copy the latest source to edit |

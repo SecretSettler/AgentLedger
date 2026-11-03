@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- **Share one report.** `agentledger share <report>` packs a report (every version, sub-reports, traces, threads)
+  into a `.agentledger.zip`; nothing else from the store travels. The recipient runs `agentledger open <file>`,
+  comments, and asks their own Claude Code or Codex, which answers from the shared traces. Their feedback returns as
+  a CSV for `agentledger comments import`; opening a newer bundle keeps their comments. Bundles are unpacked with
+  path checks and always rendered sanitised.
+- `agentledger link <report> <checkout>` lets Ask read a local checkout of the code a report describes.
+
 ## 0.2.0
 
 - **Ask the session that wrote it.** `publish --trace auto` records the Claude Code / Codex session; Ask resumes it

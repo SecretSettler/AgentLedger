@@ -298,8 +298,50 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_share(args) -> int:
+    from . import share
+
+    store = open_store(args)
+    report = store.report(args.report)
+    out = Path(args.output).expanduser() if args.output else Path.cwd() / share.default_name(report.id)
+    info = share.pack(store, report.id, out, traces=not args.no_traces, comments=not args.no_comments)
+    print(f"shared {report.id}: {info['path']}  ({human_size(info['bytes'])})")
+    print(f"  {info['versions']} version(s), {info['traces']} trace(s), {info['threads']} review thread(s)"
+          + ("" if not args.no_traces else "; traces left out") + ("" if not args.no_comments else "; threads left out"))
+    print("  the rest of your store, your local cache and GitHub settings are not included")
+    if info["traces"]:
+        print("  traces are the agent transcripts behind the report (home directory shown as ~): share them only with people you trust")
+    print(f"\nThey run:  agentledger open {out.name}")
+    print("Their comments come back as a CSV:  agentledger comments import <their-file>.csv")
+    return 0
+
+
+def cmd_link(args) -> int:
+    store = open_store(args)
+    report = store.report(args.report)
+    repo = Path(args.repo).expanduser().resolve()
+    if not repo.is_dir():
+        raise LedgerError(f"{repo} is not a folder")
+    for v in report.versions:
+        store.remember_local(report.id, v.number, {"repo_path": str(repo)})
+    ctx = (report.latest.meta.get("context") or {}) if report.latest else {}
+    print(f"{report.id}: Ask now also reads {repo}  (kept in .cache, never committed)")
+    if ctx.get("commit"):
+        print(f"  the report describes {ctx.get('repo', '')} @ {ctx['commit']}: check that commit out there for exact answers")
+    return 0
+
+
 def cmd_open(args) -> int:
     """Serve the store on this machine and open it (a report's latest version, or the dashboard)."""
+    target = args.report or ""
+    if target.endswith(".zip") and Path(target).expanduser().is_file():
+        from . import share
+
+        store, info = share.unpack(Path(target), Path(args.into) if args.into else None)
+        print(f"opened {info['report']} shared from {info.get('from', 'another store')}  →  {store.root}")
+        print(f"  send your comments back:  agentledger --store {shlex.quote(str(store.root))} comments export "
+              f"{info['report']} -o feedback.csv   (or Export CSV in the page)")
+        args.store, args.report = str(store.root), info["report"]
     store = open_store(args)
     if args.report:
         report = store.report(args.report)
@@ -830,10 +872,23 @@ def make_parser() -> argparse.ArgumentParser:
         s.add_argument("--ask-timeout", type=float, default=900, help="seconds before an answer is abandoned")
         s.add_argument("--quiet", action="store_true")
 
-    s = sub.add_parser("open", help="review in the browser: serve on this machine and open a report or the dashboard")
-    s.add_argument("report", nargs="?", help="report id (default: the dashboard)")
+    s = sub.add_parser("open", help="review in the browser: serve on this machine and open a report, a shared bundle, or the dashboard")
+    s.add_argument("report", nargs="?", help="report id, or a .agentledger.zip someone shared (default: the dashboard)")
+    s.add_argument("--into", help="where to unpack a shared bundle (default ~/.cache/agentledger/shared/<report>)")
     serve_options(s)
     s.set_defaults(func=cmd_open, path=None)
+
+    s = sub.add_parser("share", help="pack one report (versions, traces, threads) into a file someone else can open")
+    s.add_argument("report")
+    s.add_argument("-o", "--output", help="file to write (default ./<report>.agentledger.zip)")
+    s.add_argument("--no-traces", action="store_true", help="leave the agent transcripts out")
+    s.add_argument("--no-comments", action="store_true", help="leave the review threads out")
+    s.set_defaults(func=cmd_share)
+
+    s = sub.add_parser("link", help="tell Ask where the repository a report describes is checked out on this machine")
+    s.add_argument("report")
+    s.add_argument("repo", help="path to your checkout")
+    s.set_defaults(func=cmd_link)
 
     s = sub.add_parser("demo", help="try it: build a sample store and open it in the browser")
     s.add_argument("--dir", help="where to build it (default ~/.cache/agentledger/demo-store)")

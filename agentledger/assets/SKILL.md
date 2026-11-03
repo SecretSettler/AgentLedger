@@ -55,4 +55,11 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
 
 Keep replies short and specific: what you checked, what you found, what changed.
 
+## Sharing a report with someone
+
+`agentledger share <report-id>` writes `<report>.agentledger.zip` (versions, sub-reports, traces, threads; nothing
+else from the store). Tell the user the file path, that the recipient runs `agentledger open <file>` and can Ask their
+own agent, and that traces are agent transcripts (`--no-traces` leaves them out). Feedback comes back as a CSV:
+`agentledger comments import <file>`, then handle it like any other review comments.
+
 For hosted shared review, verify that comments reach the canonical comments.csv, not only browser storage or a separate web database. Pull with agentledger sync before answering. Never expose unrelated private threads.
