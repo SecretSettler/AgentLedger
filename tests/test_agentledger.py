@@ -13,6 +13,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from agentledger import comments as cm
@@ -598,6 +599,116 @@ class PrivacyTests(unittest.TestCase):
         self.store.add_comment("p/r", f"log at {self.home}/run.log", author="me")
         code, out = run("--store", str(self.root), "check")
         self.assertIn("comments.csv: contains a path under your home directory", out)
+
+
+class ShareTests(unittest.TestCase):
+    """One report travels as a file: the reader opens it, comments, asks their own agent; feedback comes back as CSV."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = {k: os.environ.get(k) for k in ("HOME",)}
+        os.environ["HOME"] = str(self.tmp / "owner-home")
+        self.owner = Store(init_store(self.tmp / "owner", name="Owner", repo="me/private-ledger"))
+        trace = self.tmp / "session.jsonl"
+        trace.write_text('{"note": "measured 4721 us"}\n')
+        self.owner.publish("demo/benchmark", DEMO / "benchmark-v1.md", traces=[trace])
+        self.owner.publish("demo/benchmark/dna", DEMO / "dna-primer.md")
+        self.owner.publish("demo/other", DEMO / "dna-primer.md")          # must not travel
+        self.owner.remember_local("demo/benchmark", 1, {"repo_path": "/somewhere/private"})
+        self.owner.save_rows(cm.parse((DEMO / "comments-v1.csv").read_text()))
+        build(self.owner)
+        self.bundle = self.tmp / "out" / "benchmark.agentledger.zip"
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        shutil.rmtree(self.tmp)
+
+    def test_bundle_holds_only_that_report(self):
+        code, out = run("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.bundle))
+        self.assertEqual(code, 0, out)
+        names = zipfile.ZipFile(self.bundle).namelist()
+        self.assertIn("projects/demo/benchmark/v001/traces/session.jsonl.gz", names)
+        self.assertIn("projects/demo/benchmark/dna/v001/report.md", names)
+        self.assertFalse([n for n in names if n.startswith("projects/demo/other") or n.startswith(".cache")])
+        config = json.loads(zipfile.ZipFile(self.bundle).read("agentledger.json"))
+        self.assertNotIn("github", config)
+        self.assertNotIn("/somewhere/private", zipfile.ZipFile(self.bundle).read("projects/demo/benchmark/v001/meta.json").decode())
+        code, out = run("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.tmp / "lean.zip"), "--no-traces", "--no-comments")
+        lean = zipfile.ZipFile(self.tmp / "lean.zip")
+        self.assertFalse([n for n in lean.namelist() if "/traces/" in n])
+        self.assertEqual(cm.parse(lean.read("projects/demo/benchmark/v001/comments.csv").decode()), [])
+
+    def test_reader_comments_asks_and_sends_feedback(self):
+        from agentledger import share
+        share.pack(self.owner, "demo/benchmark", self.bundle)
+        os.environ["HOME"] = str(self.tmp / "reader-home")
+        reader, info = share.unpack(self.bundle)
+        self.assertTrue(str(reader.root).startswith(str(self.tmp / "reader-home")))
+        self.assertEqual(info["report"], "demo/benchmark")
+        row = reader.add_comment("demo/benchmark", "Where does this number come from?", module="results",
+                                 quote="Harness out tok", author="dan")
+        agent = self.tmp / "agent.py"
+        agent.write_text("import sys; p = sys.stdin.read(); print('from trace' if '.cache/projects/demo/benchmark/v001/traces/session.jsonl' in p else 'no trace')")
+        code, out = run("--store", str(reader.root), "ask", row["id"], "--cmd", f"{sys.executable} {agent}")
+        self.assertEqual(code, 0, out)
+        self.assertIn("from trace", out)
+        feedback = self.tmp / "feedback.csv"
+        self.assertEqual(run("--store", str(reader.root), "comments", "export", "demo/benchmark", "-o", str(feedback))[0], 0)
+        # back on the owner's machine
+        os.environ["HOME"] = str(self.tmp / "owner-home")
+        self.assertEqual(run("--store", str(self.owner.root), "comments", "import", str(feedback))[0], 0)
+        mine = [r for r in self.owner.comments() if r["id"] == row["id"] or r["reply_to"] == row["id"]]
+        self.assertEqual(len(mine), 2)
+        # the owner replies and ships a new version; the reader's own thread survives re-opening
+        self.owner.reply("c_demo1", "re-tokenized", author="claude-code")
+        self.owner.publish("demo/benchmark", DEMO / "benchmark-v2.md")
+        share.pack(self.owner, "demo/benchmark", self.bundle)
+        os.environ["HOME"] = str(self.tmp / "reader-home")
+        local = reader.add_comment("demo/benchmark", "unsent note", author="dan")
+        reader, _ = share.unpack(self.bundle)
+        ids = {r["id"] for r in reader.comments()}
+        self.assertTrue({local["id"], row["id"]} <= ids)
+        self.assertEqual(len(reader.report("demo/benchmark").versions), 2)
+
+    def test_hostile_bundles_are_refused_or_defused(self):
+        from agentledger import share
+        share.pack(self.owner, "demo/benchmark", self.bundle)
+        evil = self.tmp / "evil.agentledger.zip"
+        with zipfile.ZipFile(self.bundle) as src, zipfile.ZipFile(evil, "w") as z:
+            for n in src.namelist():
+                z.writestr(n, src.read(n))
+            z.writestr("../outside.txt", "x")
+        with self.assertRaises(LedgerError):
+            share.unpack(evil, self.tmp / "evil-open")
+        self.assertFalse((self.tmp / "outside.txt").exists())
+        plain = self.tmp / "plain.zip"
+        with zipfile.ZipFile(plain, "w") as z:
+            z.writestr("hello.txt", "x")
+        with self.assertRaises(LedgerError):
+            share.unpack(plain, self.tmp / "plain-open")
+        scripted = self.tmp / "scripted.agentledger.zip"
+        with zipfile.ZipFile(self.bundle) as src, zipfile.ZipFile(scripted, "w") as z:
+            for n in src.namelist():
+                data = src.read(n)
+                if n == "projects/demo/benchmark/v001/meta.json":
+                    meta = json.loads(data)
+                    meta["allow_scripts"] = True
+                    data = json.dumps(meta).encode()
+                if n == "projects/demo/benchmark/v001/report.md":
+                    data += b"\n<script>alert(1)</script>\n"
+                z.writestr(n, data)
+        reader, _ = share.unpack(scripted, self.tmp / "scripted-open")
+        page = (reader.root / "projects/demo/benchmark/v001/index.html").read_text()
+        self.assertNotIn("alert(1)", page)
+
+    def test_link_points_ask_at_a_checkout(self):
+        from agentledger.ask import build_prompt
+        repo = self.tmp / "my-checkout"
+        repo.mkdir()
+        self.assertEqual(run("--store", str(self.owner.root), "link", "demo/benchmark", str(repo))[0], 0)
+        _, cwd = build_prompt(self.owner, "c_demo1")
+        self.assertEqual(cwd, repo.resolve())
 
 
 class ServerTests(unittest.TestCase):
