@@ -54,3 +54,5 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
 6. `agentledger sync -m "<report-id> vN: address review"`.
 
 Keep replies short and specific: what you checked, what you found, what changed.
+
+For hosted shared review, verify that comments reach the canonical comments.csv, not only browser storage or a separate web database. Pull with agentledger sync before answering. Never expose unrelated private threads.

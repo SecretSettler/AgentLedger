@@ -195,6 +195,17 @@ The skill tells the agent all of this; it's here for when you write one yourself
   `agentledger sync`. Pages opened from disk can also **Save to GitHub** with a fine-grained token (Contents: read and
   write), or **Export CSV** for `agentledger comments import`.
 
+### Hosted shared comments
+
+A static page keeps drafts in each browser until saved. A hosted review server can use
+[github-sync.mjs](agentledger/assets/github-sync.mjs) to mirror shared comments into the private store's `comments.csv`.
+Keep the GitHub token on the server, scoped to that store; reviewers need no GitHub token.
+
+Apply [hosted-comments.sql](agentledger/assets/hosted-comments.sql) as a database migration, authenticate reviewers in
+the host, persist their rows, then call `syncHostedComments(db, github, reportId)`. Pending rows survive a GitHub outage.
+The adapter retries concurrent writes and does not commit unchanged rows. Only shared threads and agent replies to
+them return to the page; unrelated private threads stay private. Agents review through the normal `agentledger sync` loop.
+
 ### Privacy and security
 
 - Nothing goes anywhere but your own repo. Pages load no external scripts, fonts or images. The only network call a
