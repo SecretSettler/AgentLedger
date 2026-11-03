@@ -51,3 +51,12 @@ test("rejects traversal and cross-report writes before sending a request",async(
  assert.throws(()=>store.url("../private",1),/Invalid report/);
  await assert.rejects(store.merge("demo/report",1,[row("bad",{report:"private/report"})]),/scope/);
 });
+
+test("default fetch keeps the host runtime receiver",async()=>{
+ const saved=globalThis.fetch, github=fakeGitHub([row("public")]);
+ globalThis.fetch=function(...args){assert.equal(this,globalThis);return github.fetcher(...args);};
+ try {
+  const store=new GitHubCommentStore({repo:"owner/ledger",token:"test-token"});
+  await store.merge("demo/report",1,[row("public")]);
+ } finally {globalThis.fetch=saved;}
+});

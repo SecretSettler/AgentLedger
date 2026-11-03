@@ -28,7 +28,7 @@ function decode64(text){return new TextDecoder().decode(Uint8Array.from(atob(tex
 function encode64(text){const bytes=new TextEncoder().encode(text);let s="";for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return btoa(s);}
 function validReport(id){return /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/.test(id);}
 export class GitHubCommentStore {
-  constructor({repo,branch="main",token,root="",fetcher=fetch}) {
+  constructor({repo,branch="main",token,root="",fetcher=(...args)=>globalThis.fetch(...args)}) {
     if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))throw new Error("Invalid GitHub repository");
     if(!token)throw new Error("A server-side GitHub token is required");
     if(root && root.split("/").some(p=>!p || p==="." || p===".."))throw new Error("Invalid store root");
