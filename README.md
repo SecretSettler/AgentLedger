@@ -188,6 +188,16 @@ The skill tells the agent all of this; it's here for when you write one yourself
 - From the terminal: `agentledger ask <comment-id>`. `--print-prompt` shows exactly what the agent receives.
 - Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
 
+### Read with your own AI
+
+Use [agentledger-reader](skills/agentledger-reader) in Codex or Claude Code to investigate a shared report in your
+own session. Give it the report URL and your question. It pins the report version, locates cited private release
+batches and verifies each trace file it retrieves. It uses your own GitHub login and model account.
+
+A reader kit can include the public report and charts; private traces remain in their original releases. The helper
+downloads one selected run at a time, rather than copying the whole report store or experiment batch.
+See the skill for commands and TrajFS requirements.
+
 ### Sharing
 
 **One report, to someone who should ask their own AI about it:**
