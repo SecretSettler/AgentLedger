@@ -69,7 +69,7 @@ class ReaderTests(unittest.TestCase):
 
     def test_hosted_alias_is_pinned(self):
         d = reader.resolve("https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/#cases")
-        self.assertEqual(d["version"], 3)
+        self.assertEqual(d["version"], 4)
         self.assertEqual(len(d["commit"]), 40)
         self.assertEqual(len(d["sha256"]), 64)
 
