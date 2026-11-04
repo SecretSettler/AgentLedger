@@ -6,13 +6,13 @@
       "aliases": [
         "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/",
         "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/index.html",
-        "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/v004/index.html"
+        "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/v005/index.html"
       ],
       "repo": "SecretSettler/agent-ledger-store",
       "report": "ma-infra/gpu-resource-coordination/message-vs-tool",
-      "version": 4,
-      "commit": "8f99fbf80ad6bde56bd16937ecb25932102aa7e0",
-      "sha256": "6409c2fee88e19b654b6fd911d50ab9ad8d5f2dad1d03078f34a8bbf957a0535"
+      "version": 5,
+      "commit": "b2d3339cc90370932747574b3b7e86fef32c5b9a",
+      "sha256": "550ce936e8f232527d21ff03f795216438ec1c1bc25d3f8d5e8e0f030cb35533"
     },
     {
       "url": "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/v010/index.html",
@@ -37,6 +37,18 @@
       "version": 3,
       "commit": "9e32b6623360a002537c093a29a4502697d2f075",
       "sha256": "f001e46e0e943cdc025bfd5d47febbe5f7923557e918f85644c1b25b7c896f70",
+      "archive_only": true
+    },
+    {
+      "url": "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/v004/index.html",
+      "aliases": [
+        "https://ma-infra-report-20261103.seanjiang2001.chatgpt.site/resource-tools/v004/index.html"
+      ],
+      "repo": "SecretSettler/agent-ledger-store",
+      "report": "ma-infra/gpu-resource-coordination/message-vs-tool",
+      "version": 4,
+      "commit": "8f99fbf80ad6bde56bd16937ecb25932102aa7e0",
+      "sha256": "6409c2fee88e19b654b6fd911d50ab9ad8d5f2dad1d03078f34a8bbf957a0535",
       "archive_only": true
     }
   ]
