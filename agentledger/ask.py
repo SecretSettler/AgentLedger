@@ -9,10 +9,12 @@ reply in the thread.
 When the report was published with ``--trace auto``, the question goes to the
 very session that wrote it, so the agent answers with its full memory of the
 work: Claude Code resumes it as a fork (``--resume --fork-session``, the original
-stays untouched), Codex resumes it in place (``codex exec resume``).  Each review
-thread keeps its own continuation, so follow-up questions pick up where the last
-answer left off.  If the session cannot be resumed, a fresh read-only run answers
-from the traces instead.
+stays untouched), Codex resumes it in place (``codex exec resume``).  The first
+question on a report version starts its review session that way, or as a fresh
+read-only run when no session was recorded; every later question on that version,
+in any thread, continues the review session, so the agent remembers the review so
+far.  Questions on one version run one at a time.  If the session cannot be resumed,
+a fresh read-only run answers from the traces instead.
 """
 
 from __future__ import annotations
@@ -50,6 +52,10 @@ SCRUB_ENV = (
     "CODEX_THREAD_ID", "CODEX_SESSION_ID",
 )
 THREAD_SESSIONS = "ask-sessions.json"
+# Claude Code leaves sessions whose entrypoint is sdk-cli, sdk-ts or sdk-py out of `claude --resume` and the IDE's
+# session history, and `claude -p` records sdk-cli unless CLAUDE_CODE_ENTRYPOINT already names another entrypoint.
+# Ask names its own, so a reviewer can open the session that answered; AGENTLEDGER_ASK_ENTRYPOINT=sdk-cli hides it.
+ASK_ENTRYPOINT = "agentledger-ask"
 
 
 class AskError(Exception):
@@ -103,14 +109,29 @@ def _sessions_file(store: Store) -> Path:
     return store.root / CACHE_DIR / THREAD_SESSIONS
 
 
-def thread_session(store: Store, thread: str) -> Optional[dict]:
-    return read_json(_sessions_file(store)).get(thread)
+def review_key(root: dict) -> str:
+    """One review session per report version: every thread opened on it shares the session."""
+    return f"{root['report']}@v{int(root['version'])}"
 
 
-def remember_thread_session(store: Store, thread: str, session: dict) -> None:
+def review_session(store: Store, root: dict) -> Optional[dict]:
+    return read_json(_sessions_file(store)).get(review_key(root))
+
+
+def remember_review_session(store: Store, root: dict, session: dict) -> None:
     data = read_json(_sessions_file(store))
-    data[thread] = session
+    data[review_key(root)] = session
     write_json(_sessions_file(store), data)
+
+
+_REVIEW_LOCKS: dict[str, threading.Lock] = {}
+_REVIEW_LOCKS_GUARD = threading.Lock()
+
+
+def _review_lock(key: str) -> threading.Lock:
+    """Questions on one version wait for each other, so two never continue the same session at once."""
+    with _REVIEW_LOCKS_GUARD:
+        return _REVIEW_LOCKS.setdefault(key, threading.Lock())
 
 
 @dataclass
@@ -120,17 +141,18 @@ class Plan:
     fork: bool = False            # Claude: branch off instead of appending to the original
     cwd: Optional[Path] = None
     note: str = ""
+    again: bool = False           # continuing this version's review session
 
 
 def plan(store: Store, root: dict, default: Optional[Backend], choice: str = "auto") -> Plan:
-    """Pick who answers: this thread's continuation, else the session that wrote the report, else ``default``."""
+    """Pick who answers: this version's review session, else the session that wrote the report, else ``default``."""
     if default is not None and default.kind == "plain":
         return Plan(default)
     report = store.report(root["report"])
-    mine = thread_session(store, root["id"])
+    mine = review_session(store, root)
     if mine and shutil.which(mine["agent"]) and choice in ("auto", mine["agent"]):
         return Plan(agent_backend(mine["agent"]), mine["id"], False, _dir(mine.get("cwd")),
-                    "continuing this thread's session")
+                    "continuing this report's review session", again=True)
     versions = [report.version(int(root["version"]))] + [v for v in reversed(report.versions) if v.number != int(root["version"])]
     for v in versions:
         s = v.meta.get("session")
@@ -150,10 +172,19 @@ def _dir(path: Optional[str]) -> Optional[Path]:
 
 
 def repo_checkout(store: Store, report_id: str, number: int) -> Optional[Path]:
-    """Where the repository a version describes is checked out on this machine (local cache only)."""
-    local = store.local_info(report_id, number).get("repo_path")
-    legacy = (store.report(report_id).version(number).meta.get("context") or {}).get("path")  # stores from 0.2.0
-    return _dir(local) or _dir(legacy)
+    """Where the repository a version describes is checked out on this machine (local cache only).
+
+    A version published after ``agentledger link`` (or from outside a git repo) has no checkout of its own; it uses
+    the nearest version's, earlier ones first, so a new version keeps the report's link."""
+    report = store.report(report_id)
+    others = sorted((v.number for v in report.versions if v.number != number), key=lambda n: (n > number, abs(n - number)))
+    for n in [number] + others:
+        local = store.local_info(report_id, n).get("repo_path")
+        legacy = (report.version(n).meta.get("context") or {}).get("path")  # stores from 0.2.0
+        found = _dir(local) or _dir(legacy)
+        if found:
+            return found
+    return None
 
 
 def session_cwd(store: Store, report_id: str, number: int, session: dict) -> Optional[Path]:
@@ -174,7 +205,7 @@ def scrub_paths(text: str, store_root: Path, repo_path: Optional[Path]) -> str:
 
 
 # ------------------------------------------------------------------ prompt
-def build_prompt(store: Store, cid: str, resumed: bool = False) -> tuple[str, Path]:
+def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = False) -> tuple[str, Path]:
     """Return (prompt, working directory) for answering thread ``cid``."""
     root, replies = thread_of(store, cid)
     report = store.report(root["report"])
@@ -183,9 +214,15 @@ def build_prompt(store: Store, cid: str, resumed: bool = False) -> tuple[str, Pa
     repo_path = repo_checkout(store, report.id, v.number)
     cwd = repo_path or store.root
 
+    if again:
+        opening = ("A reviewer has another question about the report you have been answering about in this session. "
+                   "Answer from evidence.")
+    elif resumed:
+        opening = "A reviewer is asking about the report you published earlier in this session. Answer from evidence."
+    else:
+        opening = "A reviewer is asking about a passage in a report an agent wrote. Answer from evidence."
     lines = [
-        ("A reviewer is asking about the report you published earlier in this session. Answer from evidence."
-         if resumed else "A reviewer is asking about a passage in a report an agent wrote. Answer from evidence."),
+        opening,
         "",
         f"Report: {report.title}  (id `{report.id}`, opened on v{v.number}, latest v{report.latest.number})",
         f"Report source: {store.root / store.rel(v.source)}",
@@ -308,8 +345,9 @@ class CodexStream:
 
 def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
                 on_progress: Callable[[str], None] = lambda s: None, timeout: float = 900,
-                resume: Optional[str] = None, fork: bool = False) -> tuple[str, Optional[str]]:
-    """Run one question; return ``(answer, session id to continue)``."""
+                resume: Optional[str] = None, fork: bool = False,
+                name: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """Run one question; return ``(answer, session id to continue)``.  ``name`` titles a new Claude Code session."""
     argv = list(backend.argv)
     last_msg = None
     new_id = None
@@ -320,13 +358,15 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
         if resume:
             argv += ["--resume", resume] + (["--fork-session"] if fork else [])
         if new_id:
-            argv += ["--session-id", new_id]
+            argv += ["--session-id", new_id] + (["--name", name] if name else [])
         argv += ["--add-dir", str(store_root)]
     elif backend.kind == "codex":
         fd, last_msg = tempfile.mkstemp(prefix="agentledger-", suffix=".txt")
         os.close(fd)
         argv += ["-o", last_msg] + (["resume", resume, "-"] if resume else ["-"])
     env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    if backend.kind == "claude":
+        env["CLAUDE_CODE_ENTRYPOINT"] = os.environ.get("AGENTLEDGER_ASK_ENTRYPOINT") or ASK_ENTRYPOINT
     try:
         proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env)
@@ -394,13 +434,24 @@ def answer_thread(store: Store, cid: str, backend: Optional[Backend], *, choice:
     with guard:
         store.invalidate()
         root, _ = thread_of(store, cid)
+    with _review_lock(review_key(root)):
+        return _answer(store, cid, backend, choice, guard, on_progress, timeout, on_plan)
+
+
+def _answer(store: Store, cid: str, backend: Optional[Backend], choice: str, guard: threading.Lock,
+            on_progress: Callable[[str], None], timeout: float, on_plan: Callable[[Plan], None]) -> dict:
+    with guard:
+        store.invalidate()
+        root, _ = thread_of(store, cid)
         how = plan(store, root, backend, choice)
-        prompt, cwd = build_prompt(store, cid, resumed=bool(how.resume))
+        prompt, cwd = build_prompt(store, cid, resumed=bool(how.resume), again=how.again)
     on_plan(how)
     on_progress(f"{how.backend.name}: {how.note}" if how.note else f"{how.backend.name} is reading the report and its traces")
     run_dir = how.cwd or cwd
+    title = f"AgentLedger: {root['report']} v{int(root['version'])}"
     try:
-        answer, session = run_backend(how.backend, prompt, run_dir, store.root, on_progress, timeout, how.resume, how.fork)
+        answer, session = run_backend(how.backend, prompt, run_dir, store.root, on_progress, timeout, how.resume, how.fork,
+                                      name=title)
     except AskError as exc:
         if not how.resume:
             raise
@@ -409,7 +460,7 @@ def answer_thread(store: Store, cid: str, backend: Optional[Backend], *, choice:
         fresh = backend if backend is not None else agent_backend(how.backend.kind)
         how = Plan(fresh)
         prompt, cwd = build_prompt(store, cid)
-        answer, session = run_backend(fresh, prompt, cwd, store.root, on_progress, timeout)
+        answer, session = run_backend(fresh, prompt, cwd, store.root, on_progress, timeout, name=title)
         run_dir = cwd
     answer = scrub_paths(answer, store.root, repo_checkout(store, root["report"], int(root["version"])))
     ts = now_iso()
@@ -422,7 +473,7 @@ def answer_thread(store: Store, cid: str, backend: Optional[Backend], *, choice:
         store.invalidate()
         store.save_rows([row])
         if session and how.backend.kind in ("claude", "codex"):
-            remember_thread_session(store, root["id"], {"agent": how.backend.kind, "id": session, "cwd": str(run_dir)})
+            remember_review_session(store, root, {"agent": how.backend.kind, "id": session, "cwd": str(run_dir)})
         build(store)
     return row
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **A link covers later versions.** A version published after `agentledger link`, or from outside a git repo, now uses
+  the nearest version's checkout, so Ask still runs in (and reads) the linked repository instead of the store.
+- **One review session per version.** The first Ask on a version forks the session that wrote it (or starts fresh),
+  and every later question on that version, in any thread, continues that review session instead of forking again.
+  Questions on one version are answered one at a time, so two never continue the session at once.
+- **Open the session behind an answer.** Ask's Claude Code sessions are named `AgentLedger: <report> v<N>` and
+  appear in `claude --resume` and the IDE's session history. Claude Code lists no `claude -p` session (entrypoint
+  `sdk-cli`), so Ask records its own entrypoint, `agentledger-ask`; `AGENTLEDGER_ASK_ENTRYPOINT=sdk-cli` restores the
+  old behaviour.
+
 ## 0.3.0
 
 - **Share one report.** `agentledger share <report>` packs a report (every version, sub-reports, traces, threads)
