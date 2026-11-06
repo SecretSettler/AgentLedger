@@ -398,7 +398,11 @@ import json, os, sys
 argv = sys.argv[1:]
 with open(os.environ["FAKE_ARGV_LOG"], "a") as f:
     f.write(json.dumps(argv) + "\\n")
+with open(os.environ["FAKE_ARGV_LOG"] + ".entrypoint", "a") as f:
+    f.write(str(os.environ.get("CLAUDE_CODE_ENTRYPOINT")) + "\\n")
 prompt = sys.stdin.read()
+with open(os.environ["FAKE_ARGV_LOG"] + ".prompts", "a") as f:
+    f.write(json.dumps(prompt) + "\\n")
 if "--resume" in argv and os.environ.get("FAKE_FAIL_RESUME"):
     print("Error: session is busy", file=sys.stderr)
     sys.exit(1)
@@ -415,7 +419,8 @@ class SessionAskTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.saved = {k: os.environ.get(k) for k in ("PATH", "CLAUDE_CONFIG_DIR", "FAKE_ARGV_LOG", "FAKE_FAIL_RESUME")}
+        self.saved = {k: os.environ.get(k) for k in ("PATH", "CLAUDE_CONFIG_DIR", "FAKE_ARGV_LOG", "FAKE_FAIL_RESUME",
+                                                   "CLAUDE_CODE_ENTRYPOINT", "AGENTLEDGER_ASK_ENTRYPOINT")}
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         (bin_dir / "claude").write_text(FAKE_CLAUDE)
@@ -451,8 +456,9 @@ class SessionAskTests(unittest.TestCase):
         t = next((self.tmp / "claude" / "projects").rglob("*.jsonl"))
         self.assertEqual(session_info(t), {"agent": "claude", "id": self.sid, "cwd": str(self.repo)})
 
-    def test_fork_then_continue(self):
-        from agentledger.ask import answer_thread, thread_session
+    def test_one_review_session_per_version(self):
+        """The first question forks the session that wrote the report; every later one, in any thread, continues it."""
+        from agentledger.ask import answer_thread, review_session
         backend = resolve_backend("auto")
         row = answer_thread(self.store, self.cid, backend)
         self.assertEqual((row["body"], row["author"]), ("fake claude answer (resumed)", "claude"))
@@ -463,13 +469,49 @@ class SessionAskTests(unittest.TestCase):
         self.assertNotEqual(fork, self.sid)
         self.assertIn("Read", first)
         self.assertIn("Bash", first[first.index("--disallowedTools"):])
-        self.assertEqual(thread_session(self.store, self.cid)["id"], fork)
+        self.assertEqual(review_session(self.store, {"report": "p/r", "version": "1"})["id"], fork)
         self.store.reply(self.cid, "and then?", author="carol", role="human")
         answer_thread(self.store, self.cid, backend)
-        second = self.argv_log()[-1]
-        self.assertEqual(second[second.index("--resume") + 1], fork)
-        self.assertNotIn("--fork-session", second)
-        self.assertNotIn("--session-id", second)
+        other = self.store.add_comment("p/r", "and this part?", module="outcome", author="dave")["id"]
+        answer_thread(self.store, other, backend)
+        for later in self.argv_log()[-2:]:
+            self.assertEqual(later[later.index("--resume") + 1], fork)
+            self.assertNotIn("--fork-session", later)
+            self.assertNotIn("--session-id", later)
+        self.assertIn("another question", self.prompts()[-1])
+
+    def test_questions_at_once_share_one_fork(self):
+        from agentledger.ask import answer_thread
+        backend = resolve_backend("auto")
+        cids = [self.cid] + [self.store.add_comment("p/r", f"q{i}?", module="outcome", author="carol")["id"] for i in range(3)]
+        workers = [threading.Thread(target=answer_thread, args=(self.store, c, backend)) for c in cids]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+        self.assertEqual(sum("--fork-session" in a for a in self.argv_log()), 1)
+
+    def prompts(self):
+        return [json.loads(ln) for ln in (self.tmp / "argv.log.prompts").read_text().splitlines()]
+
+    def entrypoints(self):
+        return (self.tmp / "argv.log.entrypoint").read_text().split()
+
+    def test_sessions_are_listed_and_named(self):
+        """Claude Code hides sdk-cli sessions from `claude --resume` and the IDE; Ask's are visible and named."""
+        from agentledger.ask import answer_thread
+        os.environ["CLAUDE_CODE_ENTRYPOINT"] = "claude-vscode"   # serve started from inside an IDE session
+        backend = resolve_backend("auto")
+        answer_thread(self.store, self.cid, backend)
+        first = self.argv_log()[-1]
+        self.assertEqual(first[first.index("--name") + 1], "AgentLedger: p/r v1")
+        self.store.reply(self.cid, "and then?", author="carol", role="human")
+        answer_thread(self.store, self.cid, backend)
+        self.assertNotIn("--name", self.argv_log()[-1])          # continuing keeps the session and its name
+        self.assertEqual(self.entrypoints(), ["agentledger-ask", "agentledger-ask"])
+        os.environ["AGENTLEDGER_ASK_ENTRYPOINT"] = "sdk-cli"
+        answer_thread(self.store, self.store.add_comment("p/r", "again?", module="outcome", author="carol")["id"], backend)
+        self.assertEqual(self.entrypoints()[-1], "sdk-cli")
 
     def test_falls_back_to_fresh_session(self):
         from agentledger.ask import answer_thread
@@ -708,6 +750,18 @@ class ShareTests(unittest.TestCase):
         repo.mkdir()
         self.assertEqual(run("--store", str(self.owner.root), "link", "demo/benchmark", str(repo))[0], 0)
         _, cwd = build_prompt(self.owner, "c_demo1")
+        self.assertEqual(cwd, repo.resolve())
+
+    def test_link_carries_to_later_versions(self):
+        from agentledger.ask import build_prompt
+        repo = self.tmp / "my-checkout"
+        repo.mkdir()
+        self.assertEqual(run("--store", str(self.owner.root), "link", "demo/benchmark", str(repo))[0], 0)
+        self.owner.publish("demo/benchmark", DEMO / "benchmark-v2.md")  # published after the link, with no checkout
+        latest = self.owner.report("demo/benchmark").latest.number
+        self.assertEqual(self.owner.local_info("demo/benchmark", latest).get("repo_path"), None)
+        row = self.owner.add_comment("demo/benchmark", "on the new version", author="dan")
+        _, cwd = build_prompt(self.owner, row["id"])
         self.assertEqual(cwd, repo.resolve())
 
 

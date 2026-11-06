@@ -109,8 +109,9 @@ it a private remote, e.g. `gh repo create my-agent-ledger --private --source ~/a
    the local server, the GitHub API, or an exported CSV.
 4. **Ask.** Select text and press **Ask**. Your question, the quote and the thread become the prompt. The session that
    wrote the report answers, read-only: Claude Code resumes a fork of it (`--resume --fork-session`, so your original
-   session is untouched), Codex resumes it in place (`codex exec resume`). Each thread keeps its own continuation, so
-   follow-ups remember the conversation. Without the session, a fresh read-only run answers from the trace.
+   session is untouched), Codex resumes it in place (`codex exec resume`). That happens once per version: every later
+   question on the version, in any thread, continues the same review session, so the agent remembers the review so far.
+   Without the session, the first question starts the review session as a fresh read-only run that answers from the trace.
 5. **Revise.** The agent runs `agentledger comments list --status waiting`, replies in place, and publishes the next
    version with `--resolves`. Changed modules are flagged; resolved threads point at the version that fixed them.
 
@@ -187,6 +188,10 @@ The skill tells the agent all of this; it's here for when you write one yourself
   in anything that reads a prompt on stdin and prints an answer.
 - From the terminal: `agentledger ask <comment-id>`. `--print-prompt` shows exactly what the agent receives.
 - Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
+- Each version's review session is named `AgentLedger: <report> v<N>` and shows up in `claude --resume` and the IDE's
+  session history, so you can open the conversation behind the answers. Questions on one version run one at a time.
+  (Claude Code lists no `claude -p` session by default; Ask records the entrypoint `agentledger-ask` instead.
+  `AGENTLEDGER_ASK_ENTRYPOINT=sdk-cli` hides them again.)
 
 ### Sharing
 
