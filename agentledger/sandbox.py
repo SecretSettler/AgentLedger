@@ -43,6 +43,8 @@ SECRET_PATHS = (
     ".git-credentials", ".config/git/credentials", ".netrc", ".npmrc", ".pypirc", ".cargo/credentials.toml",
     ".vault-token", ".password-store", ".local/share/keyrings", ".pgpass", ".my.cnf",
     ".bash_history", ".zsh_history", ".python_history", ".psql_history", ".mysql_history", ".lesshst",
+    # macOS Terminal keeps one history file per window here, next to ~/.zsh_history (zsh) or for bash 3.2.
+    ".zsh_sessions", ".bash_sessions",
     ".claude", ".claude.json", ".claude.json.backup",
     ".codex/auth.json", ".codex/sessions", ".codex/archived_sessions", ".codex/history.jsonl", ".codex/log",
     ".codex/shell_snapshots", ".codex/memories", ".codex/*.sqlite", ".codex/*.sqlite-wal", ".codex/*.sqlite-shm",
@@ -76,12 +78,16 @@ def wanted() -> bool:
     return os.environ.get(SANDBOX_ENV, "").strip().lower() not in ("off", "0", "false", "no", "read-only")
 
 
-# Claude Code's sandbox puts Unix sockets (its network bridge) under its temp folder, and a socket path may not be
-# longer than about 104 bytes. Measured with Claude Code 2.1.318: a temp folder of 86 characters started, 87 failed
-# ("Failed to create bridge sockets"). So the scratch folder is short, <tmp>/agentledger-ask-<uid>/<12 hex>, Claude's
-# temp folder inside it is "t", a long system temp folder is replaced by /tmp, and past 76 characters Ask reads only.
+# Claude Code gives sandboxed Bash its per-user temp folder, <CLAUDE_CODE_TMPDIR>/claude-<uid>, as TMPDIR and keeps it
+# writable, but only while that path is at most 44 bytes (Unix socket paths are short). A longer one silently falls
+# back to the shared /tmp/claude-<uid>, which every Claude Code session of the user writes to (Claude Code 2.1.312:
+# `cfr=44` in its temp-folder code). So the scratch folder is short, <tmp>/al-<uid>/<8 hex>, Claude's temp folder
+# inside it is "t", a long system temp folder is replaced by /tmp, and when the real (symlink-resolved: /tmp is
+# /private/tmp on macOS) path does not fit, Ask reads only. The shared folder is also denied from writes, so a
+# Claude Code that falls back anyway refuses the commands instead of writing there.
 CLAUDE_TMP = "t"
-MAX_CLAUDE_TMP = 76
+MAX_CLAUDE_TMP = 44   # bytes, for <scratch>/t/claude-<uid>
+TAG_LEN = 8
 
 
 def _uid() -> str:
@@ -89,15 +95,16 @@ def _uid() -> str:
 
 
 def scratch_root() -> Path:
-    base = tempfile.gettempdir()
-    if len(base) > 20 and os.path.isdir("/tmp"):
-        base = "/tmp"
-    return Path(base) / f"agentledger-ask-{_uid()}"
+    """<tmp>/al-<uid>, or /tmp/al-<uid> when the system temp folder is too long for Claude Code's (see above)."""
+    root = Path(tempfile.gettempdir()) / f"al-{_uid()}"
+    if not _fits(root) and os.path.isdir("/tmp"):
+        root = Path("/tmp") / f"al-{_uid()}"
+    return root
 
 
 def scratch_dir(store_root: Path, key: str) -> Path:
     """One scratch folder per report version and store, outside the repository and the store (``.key`` says whose)."""
-    tag = hashlib.sha256(f"{store_root.resolve()}\n{key}".encode()).hexdigest()[:12]
+    tag = hashlib.sha256(f"{store_root.resolve()}\n{key}".encode()).hexdigest()[:TAG_LEN]
     return scratch_root() / tag
 
 
@@ -105,9 +112,24 @@ def claude_tmp(scratch: Path) -> Path:
     return scratch / CLAUDE_TMP
 
 
+def claude_uid_tmp(scratch: Path) -> Path:
+    """The folder Claude Code hands sandboxed Bash as TMPDIR when ``claude_tmp(scratch)`` is its CLAUDE_CODE_TMPDIR."""
+    return claude_tmp(scratch) / f"claude-{_uid()}"
+
+
+def _fits(root: Path) -> bool:
+    return len(str(claude_uid_tmp(root.resolve() / ("0" * TAG_LEN))).encode()) <= MAX_CLAUDE_TMP
+
+
 def claude_paths_fit() -> bool:
-    """Whether Claude Code's temp folder, <scratch>/t/claude-<uid>, is short enough for its sandbox sockets."""
-    return len(str(claude_tmp(scratch_root() / ("0" * 12)) / f"claude-{_uid()}")) <= MAX_CLAUDE_TMP
+    """Whether Claude Code's temp folder, <scratch>/t/claude-<uid>, is short enough that Claude Code uses it."""
+    return _fits(scratch_root())
+
+
+def shared_claude_tmp() -> list[Path]:
+    """Claude Code's shared per-user temp folder, where it falls back when its own is too long (as written, and real)."""
+    p = Path("/tmp") / f"claude-{_uid()}"
+    return list(dict.fromkeys([p, p.resolve()]))
 
 
 def _real(p: Path) -> Optional[Path]:
@@ -196,7 +218,8 @@ def claude_settings(pol: Policy) -> dict:
             "autoAllowBashIfSandboxed": True,
             "filesystem": {
                 "allowWrite": [str(pol.scratch)],
-                "denyWrite": [str(p) for p in pol.read_only],
+                # The shared Claude Code temp folder: other sessions' files (see shared_claude_tmp).
+                "denyWrite": [str(p) for p in pol.read_only] + [str(p) for p in shared_claude_tmp()],
                 "denyRead": secrets,
             },
             "network": {"allowedDomains": []},

@@ -590,7 +590,7 @@ if argv[:2] == ["debug", "prompt-input"]:
         print(f"`sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.{deny}")
     sys.exit(0)
 with open(os.environ["FAKE_ARGV_LOG"] + ".codex", "a") as f:
-    f.write(json.dumps({"argv": argv, "tmpdir": os.environ.get("TMPDIR")}) + "\\n")
+    f.write(json.dumps({"argv": argv, "tmpdir": os.environ.get("TMPDIR"), "tmpprefix": os.environ.get("TMPPREFIX")}) + "\\n")
 prompt = sys.stdin.read()
 with open(os.environ["FAKE_ARGV_LOG"] + ".prompts", "a") as f:
     f.write(json.dumps(prompt) + "\\n")
@@ -651,6 +651,8 @@ class SandboxAskTests(unittest.TestCase):
         scratch = sandbox.scratch_dir(self.root, "p/r@v1").resolve()
         self.assertEqual(box["filesystem"]["allowWrite"], [str(scratch)])
         self.assertTrue({str(self.root.resolve()), str(self.repo.resolve())} <= set(box["filesystem"]["denyWrite"]))
+        shared = Path("/tmp") / f"claude-{os.getuid()}"
+        self.assertTrue({str(shared), str(shared.resolve())} <= set(box["filesystem"]["denyWrite"]))
         home = Path(os.environ["HOME"]).resolve()
         for secret in (home / ".ssh", home / ".codex" / "auth.json", self.repo.resolve() / ".env"):
             self.assertIn(str(secret), box["filesystem"]["denyRead"])
@@ -684,6 +686,7 @@ class SandboxAskTests(unittest.TestCase):
         self.assertIn(f'"{scratch}"="write"', fs)
         self.assertIn(f'"{home / ".ssh"}"="deny"', fs)
         self.assertEqual(call["tmpdir"], str(scratch))
+        self.assertEqual(call["tmpprefix"], str(scratch / "zsh"))   # zsh here-documents go there, not under TMPDIR
         prompt = self.prompts()[-1]
         self.assertIn("rg, sed -n, cat", prompt)
         self.assertIn("Run programs (python, scripts) only when", prompt)
@@ -780,11 +783,27 @@ class SandboxAskTests(unittest.TestCase):
         from agentledger import sandbox
         long_key = "some-project/a-rather-long-report-name/with-a-part@v123"
         d = sandbox.scratch_dir(self.root, long_key)
-        self.assertEqual(len(d.name), 12)
-        self.assertLessEqual(len(str(sandbox.claude_tmp(d) / "claude-1000")), sandbox.MAX_CLAUDE_TMP)
+        self.assertEqual(len(d.name), sandbox.TAG_LEN)
+        self.assertLessEqual(len(str(sandbox.claude_uid_tmp(d.resolve())).encode()), sandbox.MAX_CLAUDE_TMP)
+        self.assertTrue(sandbox.claude_paths_fit())
         self.assertNotEqual(d, sandbox.scratch_dir(self.root, "p/r@v1"))
         pol = sandbox.policy(self.root, long_key, self.repo, self.repo)
         self.assertEqual((pol.scratch / ".key").read_text().splitlines()[0], long_key)
+
+    def test_claude_reads_only_when_its_temp_folder_would_not_fit(self):
+        """Past 44 bytes Claude Code would hand Bash the shared /tmp/claude-<uid>; Ask reads only instead."""
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        saved = sandbox.MAX_CLAUDE_TMP
+        sandbox.MAX_CLAUDE_TMP = 10
+        try:
+            self.assertFalse(sandbox.claude_paths_fit())
+            answer_thread(self.store, self.cid, resolve_backend("claude"))
+        finally:
+            sandbox.MAX_CLAUDE_TMP = saved
+        argv = self.argv_log()[-1]
+        self.assertNotIn("sandbox", self.settings(argv))
+        self.assertNotIn("Bash", argv[argv.index("--tools") + 1:argv.index("--allowedTools")])
 
     def test_off_switch_keeps_ask_read_only(self):
         """Read-only still denies the secrets: Codex through a read-only profile, Claude through Read deny rules."""
@@ -813,7 +832,9 @@ class SandboxAskTests(unittest.TestCase):
         (home / ".aws-real").mkdir()
         (home / ".aws").symlink_to(home / ".aws-real")
         (home / ".codex" / "state_5.sqlite").write_text("")
+        (home / ".zsh_sessions").mkdir()
         found = sandbox.secret_paths([self.repo])
+        self.assertIn((home / ".zsh_sessions").resolve(), found)              # macOS Terminal's per-window history
         self.assertIn((home / ".codex" / "state_5.sqlite").resolve(), found)   # globbed
         self.assertTrue((home / ".codex" / "sessions").is_dir())              # made first, so it is denied from the start
         self.assertIn((home / ".codex" / "sessions").resolve(), found)
@@ -835,7 +856,8 @@ class SandboxAskTests(unittest.TestCase):
         self.assertNotIn(home / ".gnupg", found)
         self.assertIn((self.repo / ".env").resolve(), found)
 
-    @unittest.skipUnless(shutil.which("codex") and sys.platform.startswith("linux"), "needs the real codex on Linux")
+    @unittest.skipUnless(shutil.which("codex") and sys.platform.startswith(("linux", "darwin")),
+                         "needs the real codex on Linux or macOS")
     def test_real_codex_sandbox_holds(self):
         """The real `codex sandbox` with Ask's profile: scratch writable, everything else not (no model involved)."""
         from agentledger import sandbox
@@ -852,6 +874,12 @@ class SandboxAskTests(unittest.TestCase):
                                cwd=self.repo, capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0)
             self.assertFalse(sandbox.profile_holds(r.stdout, pol), later)
+        if shutil.which("zsh"):   # macOS's default shell: here-documents need TMPPREFIX inside the scratch
+            env = dict(os.environ, TMPDIR=str(pol.scratch), TMPPREFIX=str(pol.scratch / "zsh"))
+            r = subprocess.run(["codex", "sandbox", *sandbox.codex_overrides(pol), "-P", sandbox.codex_profile(pol),
+                                "-C", str(self.repo), "--", "zsh", "-c", "cat <<'EOF'\nheredoc-ok\nEOF"],
+                               cwd=self.repo, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.stdout.strip(), "heredoc-ok", r.stderr)
 
 
 class OnboardingTests(unittest.TestCase):
@@ -990,7 +1018,7 @@ class ShareTests(unittest.TestCase):
         share.pack(self.owner, "demo/benchmark", self.bundle)
         os.environ["HOME"] = str(self.tmp / "reader-home")
         reader, info = share.unpack(self.bundle)
-        self.assertTrue(str(reader.root).startswith(str(self.tmp / "reader-home")))
+        self.assertTrue(str(reader.root.resolve()).startswith(str((self.tmp / "reader-home").resolve())))
         self.assertEqual(info["report"], "demo/benchmark")
         row = reader.add_comment("demo/benchmark", "Where does this number come from?", module="results",
                                  quote="Harness out tok", author="dan")

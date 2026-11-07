@@ -454,6 +454,9 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
         env["CLAUDE_CODE_ENTRYPOINT"] = os.environ.get("AGENTLEDGER_ASK_ENTRYPOINT") or ASK_ENTRYPOINT
     if policy and policy.writable and backend.kind == "codex":
         env["TMPDIR"] = str(policy.scratch)  # the only writable folder in Codex's profile
+        # zsh (macOS's default shell, which Codex runs commands in) puts here-document files at $TMPPREFIX, by default
+        # /tmp/zsh, not under TMPDIR; without this, `python3 - <<'EOF'` fails in the sandbox.
+        env["TMPPREFIX"] = str(policy.scratch / "zsh")
     if policy and policy.writable and backend.kind == "claude":
         # Claude Code keeps its per-user temp folder (<tmpdir>/claude-<uid>) writable in the sandbox; move it inside
         # the scratch, so the run cannot touch the temp files of the user's other Claude Code sessions.  Bash's

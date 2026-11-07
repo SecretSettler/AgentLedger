@@ -23,11 +23,19 @@
 - **Read-only keeps secrets unreadable too.** Claude Code's read-only run gets the same Read deny rules; Codex's uses
   a read-only permissions profile instead of `--sandbox read-only` (which reads everything), falling back to that flag
   only when the profile cannot be verified.
-- **Short scratch paths.** Claude Code's sandbox keeps Unix sockets under its temp folder; a temp folder past 86
-  characters made it fail to start. Scratch folders are now `<tmp>/agentledger-ask-<uid>/<12 hex>` (`.key` inside
-  names the report version), and a run whose commands were refused because the sandbox failed to initialize is
-  answered again read-only. Codex runs without
-  web search, MCP servers, the apps connector (which can search the web), browser, computer use, plugins or hooks.
+- **Short scratch paths, and never the shared temp folder.** Claude Code hands sandboxed Bash its per-user temp
+  folder (`<CLAUDE_CODE_TMPDIR>/claude-<uid>`) only while that path is at most 44 bytes; past that it silently falls
+  back to `/tmp/claude-<uid>`, which every Claude Code session of the user writes to (measured on macOS with Claude
+  Code 2.1.312). Scratch folders are now `<tmp>/al-<uid>/<8 hex>` (`.key` inside names the report version), measured
+  on the real path (`/tmp` is `/private/tmp` on macOS); when even that does not fit, Ask reads only. The shared
+  folder is denied from writes as well, so a Claude Code that falls back anyway refuses commands instead of writing
+  there. A run whose commands were refused because the sandbox failed to initialize is answered again read-only.
+  Codex runs without web search, MCP servers, the apps connector (which can search the web), browser, computer use,
+  plugins or hooks.
+- **macOS.** Codex runs commands in zsh, which puts here-document files at `$TMPPREFIX` (`/tmp/zsh`), not under
+  `TMPDIR`; Ask points it into the scratch folder, so `python3 - <<'EOF'` works in the sandbox. macOS Terminal's
+  per-window histories (`~/.zsh_sessions`, `~/.bash_sessions`) are denied like `~/.zsh_history`. The real-Codex
+  sandbox test runs on macOS too.
 - **Answers keep the reviewer's language** even when the evidence is in another one.
 - **A link covers later versions.** A version published after `agentledger link`, or from outside a git repo, now uses
   the nearest version's checkout, so Ask still runs in (and reads) the linked repository instead of the store.
