@@ -3,18 +3,22 @@
 The reviewer's selection and question become the prompt; the report source, the
 review thread so far, the repository the report describes, and the traces
 attached at publish time are the context.  The answer comes from the agent CLI
-already installed on this machine, run read-only, and is saved as an agent
-reply in the thread.
+already installed on this machine, and is saved as an agent reply in the thread.
+
+The agent reads first (Claude Code: Read, Grep, Glob) and runs programs only when
+reading cannot settle the question or the answer has to be computed.  It runs them in
+its own sandbox (see ``sandbox.py``: no network, secrets unreadable, writes only to a
+scratch folder); where that sandbox is not available, Ask stays read-only.
 
 When the report was published with ``--trace auto``, the question goes to the
 very session that wrote it, so the agent answers with its full memory of the
 work: Claude Code resumes it as a fork (``--resume --fork-session``, the original
 stays untouched), Codex resumes it in place (``codex exec resume``).  The first
 question on a report version starts its review session that way, or as a fresh
-read-only run when no session was recorded; every later question on that version,
+run when no session was recorded; every later question on that version,
 in any thread, continues the review session, so the agent remembers the review so
 far.  Questions on one version run one at a time.  If the session cannot be resumed,
-a fresh read-only run answers from the traces instead.
+a fresh run answers from the traces instead.
 """
 
 from __future__ import annotations
@@ -34,16 +38,27 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import comments as cm
+from . import sandbox
 from .build import build
 from .store import LedgerError, Store, now_iso, read_json, source_line, write_json
 from .traces import CACHE_DIR, human_size, session_info, session_transcript, unpacked
 
+# Only Read, Grep and Glob are loaded (--tools) and allowed; no MCP servers or claude.ai connectors, which reach the
+# network.  The sandbox adds Bash (sandbox.claude_argv).  Only the user's own settings load: a project's
+# .claude/settings*.json (hooks, permissions, sandbox exceptions) comes with the repository under review, and `-p`
+# skips the workspace trust prompt.
 CLAUDE_ARGV = [
-    "claude", "-p", "--output-format", "stream-json", "--verbose",
+    "claude", "-p", "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--setting-sources", "user",
+    "--tools", "Read", "Grep", "Glob",
     "--allowedTools", "Read", "Grep", "Glob",
     "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
 ]
-CODEX_ARGV = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--json"]
+# No web search, MCP servers, connectors (the ChatGPT apps connector can search the web), browser or plugins, and no
+# hooks (they run outside the sandbox).
+CODEX_OFF = ("apps", "browser_use", "browser_use_external", "in_app_browser", "computer_use", "plugins",
+             "remote_plugin", "image_generation", "hooks")
+CODEX_FLAGS = ("-c", 'web_search="disabled"', "-c", "mcp_servers={}", *[a for f in CODEX_OFF for a in ("--disable", f)])
+CODEX_ARGV = ["codex", "exec", "--sandbox", "read-only", *CODEX_FLAGS, "--skip-git-repo-check", "--json"]
 # When serve itself runs inside an agent session, the child agent must not attach to that parent session.
 # Auth and provider settings (API keys, Bedrock/Vertex switches) are left alone.
 SCRUB_ENV = (
@@ -205,8 +220,44 @@ def scrub_paths(text: str, store_root: Path, repo_path: Optional[Path]) -> str:
 
 
 # ------------------------------------------------------------------ prompt
-def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = False) -> tuple[str, Path]:
-    """Return (prompt, working directory) for answering thread ``cid``."""
+def tool_guidance(kind: str, scratch: Optional[Path]) -> list[str]:
+    """How the agent should gather evidence: read first, run programs only when reading cannot settle it.
+
+    ``scratch`` is the sandbox's writable folder, or None when the run is read-only."""
+    if kind == "claude":
+        read = "Find evidence with Read, Grep and Glob first"
+        run = "Run commands with Bash"
+    else:
+        read = "Find evidence by searching and reading files first (rg, sed -n, cat)"
+        run = "Run programs (python, scripts)"
+    lines = [
+        f"- {read}: most questions are answered by what the report, the traces or the repository already say."
+        " Do not run programs to look up something you can search for.",
+    ]
+    if scratch is None and kind == "claude":
+        return lines + [
+            "- You can read files but not run programs in this session. If the answer is a value that is not written"
+            " down and would have to be computed, say so and give the command that would compute it; do not guess.",
+        ]
+    when = (f"- {run} only when searching does not turn up the evidence and answering would mean guessing, or when"
+            " the answer is a derived value (a count, a sum, a ratio, a script re-run on the data) that is not written"
+            " down anywhere. Then compute it and answer from the result.")
+    if scratch is None:  # Codex in its read-only sandbox can still run commands that only read
+        box = "- Commands run in a read-only sandbox without network: you can compute, but cannot write any file."
+    else:
+        box = (f"- Commands run in a sandbox: no network, the repository and the store are read-only, credentials are"
+               f" unreadable. Write scripts and intermediate output only under {scratch}. Do not try to get around"
+               " the sandbox; if it blocks something you need, say what.")
+    return lines + [when, box,
+                    "- If you ran commands, end the answer with each command and the output it gave, so the reviewer"
+                    " can repeat it."]
+
+
+def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = False, kind: str = "claude",
+                 scratch: Optional[Path] = None) -> tuple[str, Path]:
+    """Return (prompt, working directory) for answering thread ``cid``.
+
+    ``kind`` is the backend answering; ``scratch`` is its sandbox's writable folder, or None when it only reads."""
     root, replies = thread_of(store, cid)
     report = store.report(root["report"])
     v = report.version(int(root["version"]))
@@ -257,12 +308,15 @@ def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = Fa
         "",
         "Reply to the last message of the conversation, as the agent that wrote the report.",
         "- Check the claim against the source, the traces and the repository before answering; cite evidence as path:line.",
+        *(tool_guidance(kind, scratch) if kind in ("claude", "codex") else []),
         "- If the report is wrong or unsupported, say so plainly and give the corrected statement.",
         "- If the evidence is not there, say what is missing instead of guessing.",
-        "- Be concise: a short paragraph or a few bullets. Answer in the language the reviewer used.",
+        "- Be concise: a short paragraph or a few bullets.",
+        "- Write the answer in the language of the reviewer's last message (Chinese if they wrote Chinese), even when"
+        " the evidence you found is in another language.",
         "- Cite files relative to the store or the repository (projects/…/report.md:12, src/x.py:40), never as absolute paths:"
         " the answer is saved into a shared repo.",
-        "- Do not modify any files.",
+        "- Do not modify the report, the store or the repository.",
     ]
     return "\n".join(lines) + "\n", cwd
 
@@ -274,9 +328,14 @@ def describe_tool(name: str, args: dict) -> str:
         return f"Grep {args.get('pattern', '')!r}" + (f" in {Path(target).name}" if target else "")
     if name == "Glob":
         return f"Glob {args.get('pattern', '')}"
+    if name == "Bash":
+        return f"Bash: {' '.join(str(args.get('command', '')).split())[:160]}"
     if target:
         return f"{name} {Path(target).name}"
     return name
+
+
+SANDBOX_INIT_FAILED = "Sandbox is required but failed to initialize"
 
 
 class ClaudeStream:
@@ -287,11 +346,29 @@ class ClaudeStream:
         self.text: list[str] = []
         self.error: Optional[str] = None
         self.session_id: Optional[str] = None
+        self.sandbox_failed = False   # a sandboxed command was refused because the sandbox did not initialize
+        self.tools: dict[str, str] = {}   # tool_use id -> tool name
 
     def feed(self, line: str) -> Optional[str]:
         try:
             ev = json.loads(line)
         except ValueError:
+            return None
+        if not isinstance(ev, dict):
+            return None
+        if ev.get("type") == "user":
+            content = (ev.get("message") or {}).get("content")
+            for part in content if isinstance(content, list) else []:
+                if not (isinstance(part, dict) and part.get("type") == "tool_result"):
+                    continue
+                body = part.get("content")
+                text = body if isinstance(body, str) else " ".join(
+                    x.get("text", "") for x in body or [] if isinstance(x, dict))
+                # Claude Code's own refusal of a Bash command, not text that some tool happened to read (a trace or a
+                # log can quote this very message): a Bash result, flagged as an error, that starts with it.
+                if (self.tools.get(part.get("tool_use_id")) == "Bash" and part.get("is_error")
+                        and text.lstrip().startswith(SANDBOX_INIT_FAILED)):
+                    self.sandbox_failed = True
             return None
         if ev.get("session_id"):
             self.session_id = ev["session_id"]
@@ -299,6 +376,7 @@ class ClaudeStream:
             note = None
             for part in (ev.get("message") or {}).get("content") or []:
                 if part.get("type") == "tool_use":
+                    self.tools[part.get("id", "")] = part.get("name", "")
                     note = describe_tool(part.get("name", ""), part.get("input") or {})
                 elif part.get("type") == "text" and part.get("text", "").strip():
                     self.text.append(part["text"])
@@ -346,9 +424,15 @@ class CodexStream:
 def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
                 on_progress: Callable[[str], None] = lambda s: None, timeout: float = 900,
                 resume: Optional[str] = None, fork: bool = False,
-                name: Optional[str] = None) -> tuple[str, Optional[str]]:
-    """Run one question; return ``(answer, session id to continue)``.  ``name`` titles a new Claude Code session."""
+                name: Optional[str] = None, policy: Optional[sandbox.Policy] = None) -> tuple[str, Optional[str]]:
+    """Run one question; return ``(answer, session id to continue)``.
+
+    ``name`` titles a new Claude Code session; ``policy`` runs the agent in its sandbox instead of read-only."""
     argv = list(backend.argv)
+    if policy and backend.kind == "claude":
+        argv = sandbox.claude_argv(argv, policy) if policy.writable else sandbox.claude_readonly_argv(argv, policy)
+    elif policy and backend.kind == "codex":
+        argv = sandbox.codex_argv(argv, policy)
     last_msg = None
     new_id = None
     if backend.kind == "claude":
@@ -366,7 +450,17 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
         argv += ["-o", last_msg] + (["resume", resume, "-"] if resume else ["-"])
     env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
     if backend.kind == "claude":
+        env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         env["CLAUDE_CODE_ENTRYPOINT"] = os.environ.get("AGENTLEDGER_ASK_ENTRYPOINT") or ASK_ENTRYPOINT
+    if policy and policy.writable and backend.kind == "codex":
+        env["TMPDIR"] = str(policy.scratch)  # the only writable folder in Codex's profile
+    if policy and policy.writable and backend.kind == "claude":
+        # Claude Code keeps its per-user temp folder (<tmpdir>/claude-<uid>) writable in the sandbox; move it inside
+        # the scratch, so the run cannot touch the temp files of the user's other Claude Code sessions.  Bash's
+        # sandbox derives it from TMPDIR, Claude Code's own files from CLAUDE_CODE_TMPDIR.
+        tmp = sandbox.claude_tmp(policy.scratch)
+        tmp.mkdir(parents=True, exist_ok=True)
+        env["CLAUDE_CODE_TMPDIR"] = env["TMPDIR"] = str(tmp)
     try:
         proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env)
@@ -400,6 +494,9 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
             proc.wait()
             if stream.error:
                 raise AskError(f"{backend.name}: {stream.error}")
+            if policy and policy.writable and isinstance(stream, ClaudeStream) and stream.sandbox_failed:
+                # Every command was refused (fail closed); answer again read-only rather than without evidence.
+                raise AskError(f"{backend.name}: the sandbox failed to initialize, so no command could run")
             if backend.kind == "claude":
                 answer = stream.final()
             else:
@@ -444,14 +541,35 @@ def _answer(store: Store, cid: str, backend: Optional[Backend], choice: str, gua
         store.invalidate()
         root, _ = thread_of(store, cid)
         how = plan(store, root, backend, choice)
-        prompt, cwd = build_prompt(store, cid, resumed=bool(how.resume), again=how.again)
+        repo = repo_checkout(store, root["report"], int(root["version"]))
+        where = how.cwd or repo or store.root
+        pol = sandbox.choose(how.backend.kind, store.root, review_key(root), where, repo, CODEX_FLAGS)
+        prompt, cwd = build_prompt(store, cid, resumed=bool(how.resume), again=how.again, kind=how.backend.kind,
+                                   scratch=pol.scratch if pol else None)
     on_plan(how)
     on_progress(f"{how.backend.name}: {how.note}" if how.note else f"{how.backend.name} is reading the report and its traces")
     run_dir = how.cwd or cwd
     title = f"AgentLedger: {root['report']} v{int(root['version'])}"
+
+    def run(b: Backend, text: str, where: Path, resume: Optional[str], fork: bool,
+            pol: Optional[sandbox.Policy]) -> tuple[str, Optional[str]]:
+        if b.kind in ("claude", "codex"):
+            on_progress(pol.summary() if pol else "read-only (--sandbox read-only): reads files, writes nothing")
+        try:
+            return run_backend(b, text, where, store.root, on_progress, timeout, resume, fork, name=title, policy=pol)
+        except AskError as exc:
+            if not pol or not sandbox.looks_like_sandbox_failure(str(exc)):
+                raise
+            # The sandbox would not start (no user namespaces, a missing dependency...): answer read-only instead.
+            # Claude Code's read-only run needs no sandbox; Codex's profiles do, so it falls back to its plain flag.
+            on_progress(f"the sandbox did not start ({str(exc)[:120]}); answering read-only")
+            sandbox.mark_unavailable(b.kind)
+            ro = sandbox.readonly_policy(store.root, where, repo) if b.kind == "claude" else None
+            ro_text, _ = build_prompt(store, cid, resumed=bool(resume), again=how.again and bool(resume), kind=b.kind)
+            return run_backend(b, ro_text, where, store.root, on_progress, timeout, resume, fork, name=title, policy=ro)
+
     try:
-        answer, session = run_backend(how.backend, prompt, run_dir, store.root, on_progress, timeout, how.resume, how.fork,
-                                      name=title)
+        answer, session = run(how.backend, prompt, run_dir, how.resume, how.fork, pol)
     except AskError as exc:
         if not how.resume:
             raise
@@ -459,8 +577,9 @@ def _answer(store: Store, cid: str, backend: Optional[Backend], choice: str, gua
         on_progress(f"could not resume the session ({str(exc)[:120]}); answering in a fresh session")
         fresh = backend if backend is not None else agent_backend(how.backend.kind)
         how = Plan(fresh)
-        prompt, cwd = build_prompt(store, cid)
-        answer, session = run_backend(fresh, prompt, cwd, store.root, on_progress, timeout, name=title)
+        pol = sandbox.choose(fresh.kind, store.root, review_key(root), repo or store.root, repo, CODEX_FLAGS)
+        prompt, cwd = build_prompt(store, cid, kind=fresh.kind, scratch=pol.scratch if pol else None)
+        answer, session = run(fresh, prompt, cwd, None, False, pol)
         run_dir = cwd
     answer = scrub_paths(answer, store.root, repo_checkout(store, root["report"], int(root["version"])))
     ts = now_iso()

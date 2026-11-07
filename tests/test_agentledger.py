@@ -406,9 +406,24 @@ with open(os.environ["FAKE_ARGV_LOG"] + ".prompts", "a") as f:
 if "--resume" in argv and os.environ.get("FAKE_FAIL_RESUME"):
     print("Error: session is busy", file=sys.stderr)
     sys.exit(1)
+boxed = "--settings" in argv and '"sandbox"' in argv[argv.index("--settings") + 1]
+if boxed and os.environ.get("FAKE_FAIL_SANDBOX"):
+    print("Error: sandbox.failIfUnavailable is set but the sandbox could not start (bubblewrap)", file=sys.stderr)
+    sys.exit(1)
 sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--resume") + 1]
 print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}))
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/x/report.md"}}]}}))
+if boxed and os.environ.get("FAKE_SANDBOX_INIT_FAIL"):
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo hi"}}]}}))
+    print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+          "content": "Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts."}]}}))
+if os.environ.get("FAKE_READS_THE_PHRASE"):   # a file the agent reads quotes the message (a test log, a report)
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "/x/log"}}]}}))
+    print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r1",
+          "content": "92 -> Sandbox is required but failed to initialize: Failed to create bridge sockets"}]}}))
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "head log"}}]}}))
+    print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "is_error": False,
+          "content": "Sandbox is required but failed to initialize: quoted by the file, printed by a command that ran"}]}}))
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": sid,
                   "result": "fake claude answer" + (" (resumed)" if "--resume" in argv else "")}))
 """
@@ -420,7 +435,11 @@ class SessionAskTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.saved = {k: os.environ.get(k) for k in ("PATH", "CLAUDE_CONFIG_DIR", "FAKE_ARGV_LOG", "FAKE_FAIL_RESUME",
-                                                   "CLAUDE_CODE_ENTRYPOINT", "AGENTLEDGER_ASK_ENTRYPOINT")}
+                                                   "CLAUDE_CODE_ENTRYPOINT", "AGENTLEDGER_ASK_ENTRYPOINT",
+                                                   "AGENTLEDGER_ASK_SANDBOX", "FAKE_FAIL_SANDBOX", "HOME")}
+        from agentledger import sandbox
+        sandbox._AVAILABLE.clear()
+        os.environ["AGENTLEDGER_ASK_SANDBOX"] = "off"  # these tests cover sessions; SandboxAskTests covers the sandbox
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         (bin_dir / "claude").write_text(FAKE_CLAUDE)
@@ -441,6 +460,8 @@ class SessionAskTests(unittest.TestCase):
         self.cid = self.store.add_comment("p/r", "why?", module="outcome", author="carol")["id"]
 
     def tearDown(self):
+        from agentledger import sandbox
+        sandbox._AVAILABLE.clear()
         for k, v in self.saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -548,6 +569,289 @@ class SessionAskTests(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+FAKE_CODEX = """#!/usr/bin/env python3
+import json, os, re, sys
+argv = sys.argv[1:]
+if argv[:2] == ["debug", "prompt-input"]:
+    with open(os.environ["FAKE_ARGV_LOG"] + ".verify", "a") as f:
+        f.write(json.dumps(argv) + "\\n")
+    if os.environ.get("FAKE_CODEX_IGNORE_PROFILE"):
+        print("`sandbox_mode` is `danger-full-access`: no restrictions. Network access is enabled.")
+        sys.exit(0)
+    prof = next((a.split("=", 1)[1].strip('"') for a in argv if a.startswith("default_permissions=")), None)
+    fs = next((a for a in argv if a.startswith(f"permissions.{prof}.filesystem=")), "")
+    writes = re.findall(r'"([^"]+)"="write"', fs)
+    deny = " The permission profile denies reading these paths/globs." if '"deny"' in fs else ""
+    if writes:
+        print(f"`sandbox_mode` is `workspace-write`. Network access is restricted. The writable root is `{writes[0]}`.{deny}")
+    else:
+        print(f"`sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.{deny}")
+    sys.exit(0)
+with open(os.environ["FAKE_ARGV_LOG"] + ".codex", "a") as f:
+    f.write(json.dumps({"argv": argv, "tmpdir": os.environ.get("TMPDIR")}) + "\\n")
+prompt = sys.stdin.read()
+with open(os.environ["FAKE_ARGV_LOG"] + ".prompts", "a") as f:
+    f.write(json.dumps(prompt) + "\\n")
+out = argv[argv.index("-o") + 1]
+open(out, "w").write("fake codex answer")
+print(json.dumps({"type": "thread.started", "thread_id": "codex-thread-1"}))
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "fake codex answer"}}))
+"""
+
+
+class SandboxAskTests(unittest.TestCase):
+    """Ask runs programs in the agent's sandbox when it is available, and reads only when it is not."""
+
+    argv_log = SessionAskTests.argv_log
+    prompts = SessionAskTests.prompts
+
+    def tearDown(self):
+        tempfile.tempdir = self.saved_tempdir
+        SessionAskTests.tearDown(self)
+
+    def setUp(self):
+        SessionAskTests.setUp(self)
+        self.saved_tempdir = tempfile.tempdir
+        (self.tmp / "t").mkdir()
+        tempfile.tempdir = str(self.tmp / "t")   # scratch folders stay inside the test's own folder
+        from agentledger import sandbox
+        os.environ.pop("AGENTLEDGER_ASK_SANDBOX", None)
+        sandbox._AVAILABLE.update({"claude": True, "codex": True})   # as if the probe had passed
+        home = self.tmp / "home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "id_ed25519").write_text("secret")
+        (home / ".codex").mkdir()
+        (home / ".codex" / "auth.json").write_text("{}")
+        os.environ["HOME"] = str(home)
+        (self.repo / ".env").write_text("KEY=1")
+        (self.tmp / "bin" / "codex").write_text(FAKE_CODEX)
+        (self.tmp / "bin" / "codex").chmod(0o755)
+
+    def settings(self, argv):
+        return json.loads(argv[argv.index("--settings") + 1])
+
+    def test_claude_runs_bash_in_its_sandbox(self):
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        answer_thread(self.store, self.cid, resolve_backend("claude"))
+        argv = self.argv_log()[-1]
+        self.assertEqual(argv[argv.index("--tools") + 1:argv.index("--allowedTools")], ["Read", "Grep", "Glob", "Bash"])
+        self.assertEqual(argv.count("--tools"), 1)
+        self.assertIn("--strict-mcp-config", argv)
+        allowed = argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")]
+        denied = argv[argv.index("--disallowedTools") + 1:argv.index("--permission-mode")]
+        self.assertEqual(allowed, ["Read", "Grep", "Glob", "Bash"])
+        self.assertEqual(denied, ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"])
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        box = self.settings(argv)["sandbox"]
+        self.assertTrue(box["enabled"] and box["failIfUnavailable"])
+        self.assertFalse(box["allowUnsandboxedCommands"])
+        scratch = sandbox.scratch_dir(self.root, "p/r@v1").resolve()
+        self.assertEqual(box["filesystem"]["allowWrite"], [str(scratch)])
+        self.assertTrue({str(self.root.resolve()), str(self.repo.resolve())} <= set(box["filesystem"]["denyWrite"]))
+        home = Path(os.environ["HOME"]).resolve()
+        for secret in (home / ".ssh", home / ".codex" / "auth.json", self.repo.resolve() / ".env"):
+            self.assertIn(str(secret), box["filesystem"]["denyRead"])
+        rules = self.settings(argv)["permissions"]["deny"]
+        self.assertIn(f"Read(/{home}/.ssh/**)", rules)
+        self.assertIn(f"Read(/{self.repo.resolve()}/.env)", rules)
+        self.assertEqual(box["network"]["allowedDomains"], [])
+        prompt = self.prompts()[-1]
+        self.assertIn("Find evidence with Read, Grep and Glob first", prompt)
+        self.assertIn("Run commands with Bash only when searching does not turn up the evidence", prompt)
+        self.assertIn(str(scratch), prompt)
+
+    def test_codex_uses_a_permissions_profile(self):
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        row = answer_thread(self.store, self.cid, resolve_backend("codex"), choice="codex")
+        self.assertEqual(row["body"], "fake codex answer")
+        call = json.loads((self.tmp / "argv.log.codex").read_text().splitlines()[-1])
+        argv = call["argv"]
+        self.assertNotIn("--sandbox", argv)
+        self.assertIn('default_permissions="agentledger-ask"', argv)
+        self.assertIn('web_search="disabled"', argv)
+        self.assertIn("permissions.agentledger-ask.network.enabled=false", argv)
+        self.assertIn("mcp_servers={}", argv)
+        disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
+        self.assertTrue({"apps", "browser_use", "plugins"} <= disabled)   # the apps connector can search the web
+        fs = next(a for a in argv if a.startswith("permissions.agentledger-ask.filesystem="))
+        scratch = sandbox.scratch_dir(self.root, "p/r@v1").resolve()
+        home = Path(os.environ["HOME"]).resolve()
+        self.assertIn('":root"="read"', fs)
+        self.assertIn(f'"{scratch}"="write"', fs)
+        self.assertIn(f'"{home / ".ssh"}"="deny"', fs)
+        self.assertEqual(call["tmpdir"], str(scratch))
+        prompt = self.prompts()[-1]
+        self.assertIn("rg, sed -n, cat", prompt)
+        self.assertIn("Run programs (python, scripts) only when", prompt)
+
+    def test_falls_back_to_read_only_when_the_sandbox_will_not_start(self):
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        os.environ["FAKE_FAIL_SANDBOX"] = "1"
+        row = answer_thread(self.store, self.cid, resolve_backend("claude"))
+        self.assertTrue(row["body"].startswith("fake claude answer"))
+        tried, answered = self.argv_log()[-2:]
+        self.assertIn("sandbox", self.settings(tried))
+        self.assertNotIn("sandbox", self.settings(answered))                  # read-only, secrets still denied:
+        self.assertIn(f"Read(/{Path(os.environ['HOME']).resolve()}/.ssh/**)", self.settings(answered)["permissions"]["deny"])
+        self.assertIn("Bash", answered[answered.index("--disallowedTools"):])
+        self.assertIn("not run programs in this session", self.prompts()[-1])
+        self.assertFalse(sandbox.available("claude"))   # later questions go straight to read-only
+        self.assertEqual(answered[answered.index("--tools") + 1:answered.index("--allowedTools")], ["Read", "Grep", "Glob"])
+
+    def test_codex_runs_only_a_profile_it_has_verified(self):
+        """Before each run, `codex debug prompt-input` shows what Codex resolved from all its config layers plus Ask's
+        overrides; a profile that did not take hold is not used, whatever the config files say."""
+        from agentledger.ask import answer_thread
+        answer_thread(self.store, self.cid, resolve_backend("codex"), choice="codex")
+        verify = [json.loads(l) for l in (self.tmp / "argv.log.verify").read_text().splitlines()]
+        self.assertIn('default_permissions="agentledger-ask"', verify[-1])
+        self.assertIn("--disable", verify[-1])                               # checked with the same flags as the run
+        os.environ["FAKE_CODEX_IGNORE_PROFILE"] = "1"   # e.g. a config layer that wins over -c in some Codex version
+        try:
+            self.store.reply(self.cid, "and now?", author="carol", role="human")
+            answer_thread(self.store, self.cid, resolve_backend("codex"), choice="codex")
+        finally:
+            os.environ.pop("FAKE_CODEX_IGNORE_PROFILE", None)
+        argv = json.loads((self.tmp / "argv.log.codex").read_text().splitlines()[-1])["argv"]
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")    # last resort: writes nothing
+        self.assertFalse(any(a.startswith("default_permissions=") for a in argv))
+        self.assertIn("cannot write any file", self.prompts()[-1])
+
+    def test_claude_ignores_project_settings_and_widening_user_settings(self):
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        answer_thread(self.store, self.cid, resolve_backend("claude"))
+        argv = self.argv_log()[-1]
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "user")   # no project hooks or exceptions
+        (self.tmp / "claude" / "settings.json").write_text(json.dumps({"sandbox": {"excludedCommands": ["docker"]}}))
+        self.assertIn("excludedCommands", sandbox.claude_settings_widen())
+        self.assertFalse(sandbox.usable("claude", self.repo))
+        self.store.reply(self.cid, "and now?", author="carol", role="human")
+        answer_thread(self.store, self.cid, resolve_backend("claude"))
+        self.assertNotIn("sandbox", self.settings(self.argv_log()[-1]))     # read-only instead
+        (self.tmp / "claude" / "settings.json").write_text(json.dumps({"sandbox": {"excludedCommands": []}, "theme": "x"}))
+        self.assertIsNone(sandbox.claude_settings_widen())
+        # measured: a user's allowRead reopens a denied folder, allowWrite/allowedDomains add to Ask's lists
+        for widening in ({"filesystem": {"allowRead": ["~/.ssh"]}}, {"filesystem": {"allowWrite": ["/x"]}},
+                         {"network": {"allowedDomains": ["example.com"]}}):
+            (self.tmp / "claude" / "settings.json").write_text(json.dumps({"sandbox": widening}))
+            self.assertIsNotNone(sandbox.claude_settings_widen(), widening)
+
+    def test_a_sandbox_that_fails_mid_run_means_answering_read_only(self):
+        """Commands refused because the sandbox did not initialize: answer again read-only, not without evidence."""
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        os.environ["FAKE_SANDBOX_INIT_FAIL"] = "1"
+        try:
+            row = answer_thread(self.store, self.cid, resolve_backend("claude"))
+        finally:
+            os.environ.pop("FAKE_SANDBOX_INIT_FAIL", None)
+        tried, answered = self.argv_log()[-2:]
+        self.assertIn("sandbox", self.settings(tried))
+        self.assertNotIn("sandbox", self.settings(answered))
+        self.assertTrue(row["body"].startswith("fake claude answer"))
+        self.assertFalse(sandbox.available("claude"))
+
+    def test_quoting_the_failure_message_is_not_a_sandbox_failure(self):
+        """Reading a trace or report that quotes Claude Code's sandbox error, even printing it from Bash, is not one."""
+        from agentledger.ask import answer_thread
+        from agentledger import sandbox
+        os.environ["FAKE_READS_THE_PHRASE"] = "1"
+        try:
+            row = answer_thread(self.store, self.cid, resolve_backend("claude"))
+            self.store.reply(self.cid, "and read-only?", author="carol", role="human")
+            os.environ["AGENTLEDGER_ASK_SANDBOX"] = "off"
+            answer_thread(self.store, self.cid, resolve_backend("claude"))
+        finally:
+            os.environ.pop("FAKE_READS_THE_PHRASE", None)
+        self.assertTrue(row["body"].startswith("fake claude answer"))
+        first, second = self.argv_log()[-2:]
+        self.assertIn("sandbox", self.settings(first))            # answered in the sandbox, no read-only retry
+        self.assertNotIn("sandbox", self.settings(second))
+        os.environ.pop("AGENTLEDGER_ASK_SANDBOX", None)
+        self.assertTrue(sandbox.available("claude"))              # and the sandbox stays on for later questions
+
+    def test_scratch_paths_stay_short_for_claude_sockets(self):
+        from agentledger import sandbox
+        long_key = "some-project/a-rather-long-report-name/with-a-part@v123"
+        d = sandbox.scratch_dir(self.root, long_key)
+        self.assertEqual(len(d.name), 12)
+        self.assertLessEqual(len(str(sandbox.claude_tmp(d) / "claude-1000")), sandbox.MAX_CLAUDE_TMP)
+        self.assertNotEqual(d, sandbox.scratch_dir(self.root, "p/r@v1"))
+        pol = sandbox.policy(self.root, long_key, self.repo, self.repo)
+        self.assertEqual((pol.scratch / ".key").read_text().splitlines()[0], long_key)
+
+    def test_off_switch_keeps_ask_read_only(self):
+        """Read-only still denies the secrets: Codex through a read-only profile, Claude through Read deny rules."""
+        from agentledger.ask import answer_thread
+        os.environ["AGENTLEDGER_ASK_SANDBOX"] = "off"
+        answer_thread(self.store, self.cid, resolve_backend("codex"), choice="codex")
+        call = json.loads((self.tmp / "argv.log.codex").read_text().splitlines()[-1])
+        argv = call["argv"]
+        self.assertNotIn("--sandbox", argv)
+        self.assertIn('default_permissions="agentledger-ask-ro"', argv)
+        fs = next(a for a in argv if a.startswith("permissions.agentledger-ask-ro.filesystem="))
+        self.assertNotIn('"write"', fs)
+        self.assertIn(f'"{Path(os.environ["HOME"]).resolve() / ".ssh"}"="deny"', fs)
+        self.assertEqual(call["tmpdir"], os.environ.get("TMPDIR"))              # left alone: nothing to write
+        self.assertIn("cannot write any file", self.prompts()[-1])
+        self.store.reply(self.cid, "and with claude?", author="carol", role="human")
+        answer_thread(self.store, self.cid, resolve_backend("claude"), choice="claude")
+        argv = self.argv_log()[-1]
+        self.assertNotIn("sandbox", self.settings(argv))
+        self.assertIn(f"Read(/{Path(os.environ['HOME']).resolve()}/.ssh/**)", self.settings(argv)["permissions"]["deny"])
+        self.assertIn("not run programs in this session", self.prompts()[-1])
+
+    def test_secret_paths_resolve_links_and_skip_missing(self):
+        from agentledger import sandbox
+        home = Path(os.environ["HOME"])
+        (home / ".aws-real").mkdir()
+        (home / ".aws").symlink_to(home / ".aws-real")
+        (home / ".codex" / "state_5.sqlite").write_text("")
+        found = sandbox.secret_paths([self.repo])
+        self.assertIn((home / ".codex" / "state_5.sqlite").resolve(), found)   # globbed
+        self.assertTrue((home / ".codex" / "sessions").is_dir())              # made first, so it is denied from the start
+        self.assertIn((home / ".codex" / "sessions").resolve(), found)
+        elsewhere = self.tmp / "elsewhere"
+        (elsewhere / "claude-cfg").mkdir(parents=True)
+        (elsewhere / "codex-home").mkdir()
+        (elsewhere / "codex-home" / "auth.json").write_text("{}")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(elsewhere / "claude-cfg")
+        os.environ["CODEX_HOME"] = str(elsewhere / "codex-home")
+        try:
+            moved = sandbox.secret_paths([])
+        finally:
+            os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
+            os.environ.pop("CODEX_HOME", None)
+        self.assertIn((elsewhere / "claude-cfg").resolve(), moved)          # where the credentials really are
+        self.assertIn((elsewhere / "codex-home" / "auth.json").resolve(), moved)
+        self.assertIn((elsewhere / "codex-home" / "sessions").resolve(), moved)
+        self.assertIn((home / ".aws-real").resolve(), found)
+        self.assertNotIn(home / ".gnupg", found)
+        self.assertIn((self.repo / ".env").resolve(), found)
+
+    @unittest.skipUnless(shutil.which("codex") and sys.platform.startswith("linux"), "needs the real codex on Linux")
+    def test_real_codex_sandbox_holds(self):
+        """The real `codex sandbox` with Ask's profile: scratch writable, everything else not (no model involved)."""
+        from agentledger import sandbox
+        os.environ["PATH"] = os.environ["PATH"].split(os.pathsep, 1)[1]   # drop the fake codex
+        os.environ["HOME"] = self.saved["HOME"]   # codex keeps helpers under its real home, never under /tmp
+        sandbox._AVAILABLE.clear()
+        self.assertTrue(sandbox._codex_ok())
+        pol = sandbox.policy(self.root, "p/r@v1", self.repo, self.repo)
+        self.assertTrue(sandbox.codex_verified(self.repo, pol))
+        self.assertTrue(sandbox.codex_verified(self.repo, sandbox.readonly_policy(self.root, self.repo, self.repo)))
+        # a profile displaced after Ask's overrides (nothing can follow them in a real run): not taken as Ask's
+        for later in ('default_permissions=":danger-full-access"', 'default_permissions=":workspace"'):
+            r = subprocess.run(["codex", "debug", "prompt-input", *sandbox.codex_overrides(pol), "-c", later, "."],
+                               cwd=self.repo, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0)
+            self.assertFalse(sandbox.profile_holds(r.stdout, pol), later)
 
 
 class OnboardingTests(unittest.TestCase):

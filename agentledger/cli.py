@@ -16,7 +16,9 @@ from pathlib import Path
 from . import __version__
 from . import comments as cm
 from .build import build
-from .ask import AskError, answer_thread, build_prompt, plan, resolve_backend, thread_of
+from . import sandbox
+from .ask import (CODEX_FLAGS, AskError, answer_thread, build_prompt, plan, repo_checkout, resolve_backend,
+                  review_key, thread_of)
 from .traces import detect_session, human_size, session_info
 from .store import (
     CONFIG_NAME, GENERATED_OR_SOURCE, PROJECTS, SLUG_RE, VERSION_DIR_RE, LedgerError, Store, check_slug, source_line,
@@ -582,6 +584,8 @@ def cmd_serve(args) -> int:
 
     store = open_store(args)
     rebuild(store, quiet=True)
+    if getattr(args, "ask_read_only", False):
+        os.environ[sandbox.SANDBOX_ENV] = "off"
     backend = resolve_backend(args.ask, args.ask_cmd)
     host = args.host or ("0.0.0.0" if args.share else "127.0.0.1")
     httpd = serve(store, host=host, port=args.port, extra_hosts=tuple(args.allow_host or ()), quiet=args.quiet,
@@ -600,6 +604,11 @@ def cmd_serve(args) -> int:
     else:
         how = "off: no claude/codex on PATH (--ask, --ask-cmd)"
     print(f"  ask     {how}")
+    if backend and backend.kind != "plain":
+        boxed = [k for k in ("claude", "codex") if sandbox.available(k)]
+        print("          " + (f"reads first; runs programs in the sandbox of {' and '.join(boxed)} when it must compute"
+                              " (no network, writes only a scratch folder)" if boxed else
+                              "read-only (no agent sandbox here, or --ask-read-only)"))
     print("  Ctrl+C to stop")
     if args.open:
         webbrowser.open(url)
@@ -614,13 +623,20 @@ def cmd_serve(args) -> int:
 
 def cmd_ask(args) -> int:
     store = open_store(args)
+    if args.read_only:
+        os.environ[sandbox.SANDBOX_ENV] = "off"
     if args.print_prompt:
         root, _ = thread_of(store, args.id)
         try:
             how = plan(store, root, resolve_backend(args.backend, args.cmd), args.backend)
         except AskError:
             how = None  # no agent installed: show what a fresh run would get
-        prompt, cwd = build_prompt(store, args.id, resumed=bool(how and how.resume))
+        kind = how.backend.kind if how else "claude"
+        repo = repo_checkout(store, root["report"], int(root["version"]))
+        pol = sandbox.choose(kind, store.root, review_key(root), (how and how.cwd) or repo or store.root, repo, CODEX_FLAGS)
+        scratch = pol.scratch if pol else None
+        prompt, cwd = build_prompt(store, args.id, resumed=bool(how and how.resume), again=bool(how and how.again),
+                                   kind=kind, scratch=scratch)
         who = (how.backend.name + (f", {how.note} ({how.resume})" if how.note else "")) if how else "no agent installed"
         print(f"# {who}; working directory {(how and how.cwd) or cwd}", file=sys.stderr)
         sys.stdout.write(prompt)
@@ -870,6 +886,8 @@ def make_parser() -> argparse.ArgumentParser:
                        help="agent that answers Ask (default: the one that wrote the report, else claude, else codex)")
         s.add_argument("--ask-cmd", help="any command that reads a prompt on stdin and prints an answer, instead of claude/codex")
         s.add_argument("--ask-timeout", type=float, default=900, help="seconds before an answer is abandoned")
+        s.add_argument("--ask-read-only", action="store_true",
+                       help="never let Ask run programs, even where the agent's sandbox is available")
         s.add_argument("--quiet", action="store_true")
 
     s = sub.add_parser("open", help="review in the browser: serve on this machine and open a report, a shared bundle, or the dashboard")
@@ -908,6 +926,7 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--cmd", help="any command that reads a prompt on stdin and prints an answer")
     s.add_argument("--timeout", type=float, default=900)
     s.add_argument("--print-prompt", action="store_true", help="print the prompt and context instead of asking")
+    s.add_argument("--read-only", action="store_true", help="never run programs, even where the agent's sandbox is available")
     s.set_defaults(func=cmd_ask)
 
     c = sub.add_parser("comments", help="list, reply to, resolve, import or export review threads")

@@ -108,10 +108,11 @@ it a private remote, e.g. `gh repo create my-agent-ledger --private --source ~/a
 3. **Comment.** Select any text and press **Comment**. Comments are saved into the version's `comments.csv`, through
    the local server, the GitHub API, or an exported CSV.
 4. **Ask.** Select text and press **Ask**. Your question, the quote and the thread become the prompt. The session that
-   wrote the report answers, read-only: Claude Code resumes a fork of it (`--resume --fork-session`, so your original
+   wrote the report answers: Claude Code resumes a fork of it (`--resume --fork-session`, so your original
    session is untouched), Codex resumes it in place (`codex exec resume`). That happens once per version: every later
    question on the version, in any thread, continues the same review session, so the agent remembers the review so far.
-   Without the session, the first question starts the review session as a fresh read-only run that answers from the trace.
+   Without the session, the first question starts the review session as a fresh run that answers from the trace. The
+   agent reads first and runs programs only to compute what is not written down (see [Asking](#asking)).
 5. **Revise.** The agent runs `agentledger comments list --status waiting`, replies in place, and publishes the next
    version with `--resolves`. Changed modules are flagged; resolved threads point at the version that fixed them.
 
@@ -187,6 +188,14 @@ The skill tells the agent all of this; it's here for when you write one yourself
   when its transcript is on this machine; otherwise `--ask claude|codex` picks the agent, and `--ask-cmd "<cmd>"` plugs
   in anything that reads a prompt on stdin and prints an answer.
 - From the terminal: `agentledger ask <comment-id>`. `--print-prompt` shows exactly what the agent receives.
+- **Read first, compute when needed.** The agent answers from the report, its traces and the repository with Read, Grep
+  and Glob (Codex: `rg`, `sed`, `cat`). It runs programs only when searching cannot settle the question or the answer
+  is a derived value (a count, a sum, a script re-run on the data), and then lists the commands and their output.
+- **The sandbox.** Programs run in the agent's own sandbox: Claude Code's Bash sandbox or a Codex permissions profile.
+  The agent can read the whole machine except confidential files and write only to a per-version scratch folder under
+  the temp directory; every other tool stays off. When the sandbox cannot start, cannot be verified or would be
+  widened, Ask only reads, and confidential files stay unreadable. `serve --ask-read-only`, `ask --read-only` or
+  `AGENTLEDGER_ASK_SANDBOX=off` force read-only mode.
 - Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
 - Each version's review session is named `AgentLedger: <report> v<N>` and shows up in `claude --resume` and the IDE's
   session history, so you can open the conversation behind the answers. Questions on one version run one at a time.
@@ -210,7 +219,8 @@ agentledger comments import feedback.csv         # their questions and their age
 The file holds only that report: not the rest of your store, your local cache or your GitHub settings
 (`--no-traces` and `--no-comments` leave those out too). Traces are agent transcripts, with your home directory shown
 as `~`, so send them only to people you trust. When you share a newer version, they open the new file and keep their
-own comments. On their side every page is sanitised and the agent runs read-only inside the unpacked folder.
+own comments. On their side every page is sanitised, and their agent works in the unpacked folder: it reads, and runs
+programs only inside its sandbox (see [Asking](#asking)).
 
 **Everything else:**
 
@@ -235,8 +245,9 @@ them return to the page; unrelated private threads stay private. Agents review t
 
 - Nothing goes anywhere but your own repo. Pages load no external scripts, fonts or images. The only network call a
   page makes is Save to GitHub; Ask runs your own agent CLI, which sends what it reads to its model provider as usual.
-- Ask is read-only (Claude Code with only Read/Grep/Glob; Codex with `--sandbox read-only`) and only served to requests
-  from the machine itself; `--share` exposes reading and commenting, never Ask. Shared mode accepts IP addresses and this
+- Ask reads, and runs programs only inside the agent's sandbox (no network, no writes outside a scratch folder,
+  credentials unreadable; read-only where no sandbox is available). It is only served to requests from the machine
+  itself; `--share` exposes reading and commenting, never Ask. Shared mode accepts IP addresses and this
   machine's names only, which blocks DNS rebinding.
 - Report HTML passes an allow-list sanitiser (no scripts, handlers, frames, forms or `javascript:` URLs); `--allow-scripts`
   skips it for reports you fully trust.
