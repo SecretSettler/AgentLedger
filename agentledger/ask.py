@@ -310,7 +310,7 @@ def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = Fa
         "- Check the claim against the source, the traces and the repository before answering; cite evidence as path:line.",
         *(tool_guidance(kind, scratch) if kind in ("claude", "codex") else []),
         "- If the report is wrong or unsupported, say so plainly and give the corrected statement.",
-        "- If the evidence is not there, say what is missing instead of guessing.",
+        "- If the evidence is not there and can't be obtained by running commands, say what is missing instead of guessing.",
         "- Be concise: a short paragraph or a few bullets.",
         "- Write the answer in the language of the reviewer's last message (Chinese if they wrote Chinese), even when"
         " the evidence you found is in another language.",
