@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- **Ask can compute.** The agent still answers from what it can read (Claude Code: Read, Grep, Glob), but when
+  searching cannot settle a question or the answer is a derived value, it runs programs and shows the commands and
+  output. They run in the agent's own sandbox: Claude Code's Bash sandbox (`failIfUnavailable`, no unsandboxed
+  retries, `dontAsk`) or a Codex permissions profile. Reads exclude credentials, agent transcripts and state, `.env`
+  files and the Docker socket; writes go only to a per-version scratch folder (Claude Code's temp folder included);
+  no network. Where the sandbox is unavailable, Ask stays read-only; `serve --ask-read-only`, `ask --read-only` and
+  `AGENTLEDGER_ASK_SANDBOX=off` force it.
+- **Fewer ways out, in both modes.** Claude Code loads only Read, Grep and Glob (plus Bash in the sandbox), no MCP
+  servers, no claude.ai connectors, and only the user's own settings: a reviewed repository's `.claude/settings.json`
+  could otherwise add hooks, which run outside any sandbox (`claude -p` skips the trust prompt). User settings that
+  widen the sandbox make Ask read-only: measured, a user's `filesystem.allowWrite` and `network.allowedDomains` add to
+  Ask's lists and `filesystem.allowRead` reopens a denied folder (`sandbox.enabled: false`,
+  `allowUnsandboxedCommands: true` and a permissive `permissions` block do not override Ask's settings).
+- **Codex: verified, not guessed.** Before each Codex run Ask renders `codex debug prompt-input` with its overrides
+  (no model call) and uses its permissions profile only if Codex resolved exactly that profile from every config
+  layer. Measured with Codex 0.158: no user or project config (`sandbox_mode`, `default_permissions`, a profile of the
+  same name, web search, apps) displaces Ask's `-c` overrides, so a config that sets `sandbox_mode` no longer sends
+  Ask to read-only.
+- **Read-only keeps secrets unreadable too.** Claude Code's read-only run gets the same Read deny rules; Codex's uses
+  a read-only permissions profile instead of `--sandbox read-only` (which reads everything), falling back to that flag
+  only when the profile cannot be verified.
+- **Short scratch paths, and never the shared temp folder.** Claude Code hands sandboxed Bash its per-user temp
+  folder (`<CLAUDE_CODE_TMPDIR>/claude-<uid>`) only while that path is at most 44 bytes; past that it silently falls
+  back to `/tmp/claude-<uid>`, which every Claude Code session of the user writes to (measured on macOS with Claude
+  Code 2.1.312). Scratch folders are now `<tmp>/al-<uid>/<8 hex>` (`.key` inside names the report version), measured
+  on the real path (`/tmp` is `/private/tmp` on macOS); when even that does not fit, Ask reads only. The shared
+  folder is denied from writes as well, so a Claude Code that falls back anyway refuses commands instead of writing
+  there. A run whose commands were refused because the sandbox failed to initialize is answered again read-only.
+  Codex runs without web search, MCP servers, the apps connector (which can search the web), browser, computer use,
+  plugins or hooks.
+- **macOS.** Codex runs commands in zsh, which puts here-document files at `$TMPPREFIX` (`/tmp/zsh`), not under
+  `TMPDIR`; Ask points it into the scratch folder, so `python3 - <<'EOF'` works in the sandbox. macOS Terminal's
+  per-window histories (`~/.zsh_sessions`, `~/.bash_sessions`) are denied like `~/.zsh_history`. The real-Codex
+  sandbox test runs on macOS too.
+- **Answers keep the reviewer's language** even when the evidence is in another one.
 - **A link covers later versions.** A version published after `agentledger link`, or from outside a git repo, now uses
   the nearest version's checkout, so Ask still runs in (and reads) the linked repository instead of the store.
 - **One review session per version.** The first Ask on a version forks the session that wrote it (or starts fresh),

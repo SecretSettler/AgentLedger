@@ -60,7 +60,7 @@ def agent_main() -> int:
     time.sleep(1.2)
     print(
         "**This is the demo agent.** With Claude Code or Codex installed, the agent that wrote the report answers here, "
-        "read-only, from the report source, its traces and the repository.\n\n"
+        "from the report source, its traces and the repository (running programs only in its sandbox).\n\n"
         f"- You asked: {question}\n"
         + (f"- About: “{quote}”\n" if quote else "")
         + "- Try it for real: `agentledger demo --ask claude` (or `--ask codex`)."
