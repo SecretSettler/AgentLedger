@@ -181,6 +181,10 @@ The skill tells the agent all of this; it's here for when you write one yourself
 - Evidence next to every claim. Images and data: `--asset <path>`; they carry over to later versions.
 - Sub-reports: publish to a longer id, `agentledger publish repo/topic/part part.md`.
 - Traces: `--trace auto` attaches the publishing session's transcript; `--trace <path>` attaches any log or folder.
+- HTML reports keep their own CSS (from `<head>` too) and their own `<h1>`, in a 980px column
+  (`<meta name="agentledger:width" content="1100">` sets another); the reading typography is for Markdown only. Scope
+  the CSS to `.al-module`, never `html`, `body` or `:root`, and put each module under a top-level `<h2 id>`.
+  Stylesheets and fonts need `--allow-scripts`; otherwise only inline `style=` survives the sanitiser.
 
 ### Asking
 

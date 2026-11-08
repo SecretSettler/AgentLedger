@@ -47,7 +47,8 @@
   }
 
   function decorateContent() {
-    $$('table', article).forEach((t) => {
+    // Markdown tables get a scrolling frame; an HTML report frames its own tables.
+    if (!article.classList.contains('al-html')) $$('table', article).forEach((t) => {
       if (t.parentElement.classList.contains('al-table-wrap')) return;
       const w = h('div.al-table-wrap');
       t.replaceWith(w);
