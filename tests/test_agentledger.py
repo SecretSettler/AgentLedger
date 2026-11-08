@@ -18,7 +18,7 @@ from pathlib import Path
 
 from agentledger import comments as cm
 from agentledger.ask import ClaudeStream, resolve_backend
-from agentledger.build import build
+from agentledger.build import build, render_version
 from agentledger.cli import main
 from agentledger.markdown import render
 from agentledger.modules import split_modules
@@ -159,6 +159,60 @@ class StoreFlowTests(unittest.TestCase):
         self.store.publish("p/r", src)
         self.store.publish("p/r", DEMO / "dna-primer.md")
         self.assertTrue((self.root / "projects/p/r/v002/img/p.png").exists())
+
+
+class HtmlReportTests(unittest.TestCase):
+    """HTML reports keep their own CSS and title; the viewer's reading typography is for Markdown only."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(init_store(self.tmp / "store", name="H"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def page(self, rid, source):
+        build(self.store)
+        v = self.store.report(rid).latest
+        return (v.path / "index.html").read_text(encoding="utf-8")
+
+    def test_html_keeps_its_head_css_title_and_width(self):
+        src = self.tmp / "r.html"
+        src.write_text("""<!doctype html><html><head><title>Pipeline</title>
+<meta name="agentledger:width" content="1100">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC">
+<style>.al-module .node{flex:1 1 150px}</style></head>
+<body><header><div class="eyebrow">task x</div><h1>Pipeline</h1><p>Lede.</p></header>
+<h2 id="overview">Overview</h2><div class="node">a</div>
+<h2 id="carve">Carve</h2><p>b</p></body></html>""", encoding="utf-8")
+        self.store.publish("p/html", src, summary="One line.", allow_scripts=True)
+        page = self.page("p/html", src)
+        self.assertIn(".al-module .node{flex:1 1 150px}", page)              # <head> CSS survives
+        self.assertIn("fonts.googleapis.com", page)
+        self.assertIn('<article class="al-article al-html" id="al-article" style="--al-html-width:1100px">', page)
+        self.assertNotIn('class="al-title"', page)                           # its own <h1> stands alone
+        self.assertNotIn('class="al-summary"', page)
+        self.assertIn("<h1>Pipeline</h1>", page)
+        self.assertEqual([m.id for m in render_version(self.store.report("p/html").latest).modules],
+                         ["intro", "overview", "carve"])
+
+    def test_a_bare_leading_h1_is_still_the_page_title(self):
+        src = self.tmp / "s.html"
+        src.write_text("<style>.x{color:red}</style><h1>Short</h1><h2>One</h2><p>a</p>", encoding="utf-8")
+        self.store.publish("p/short", src, allow_scripts=True)
+        page = self.page("p/short", src)
+        self.assertIn('<h1 class="al-title">Short</h1>', page)
+        self.assertNotIn("<h1>Short</h1>", page)
+        self.assertIn('class="al-article al-html"', page)
+        self.assertIn(".x{color:red}", page)
+
+    def test_markdown_keeps_the_reading_typography(self):
+        self.store.publish("p/md", DEMO / "dna-primer.md")
+        page = self.page("p/md", None)
+        self.assertIn('<article class="al-article" id="al-article">', page)
+        self.assertIn('class="al-title"', page)
+        css = (Path(__file__).resolve().parent.parent / "agentledger/assets/viewer.css").read_text()
+        self.assertIn(".al-article:not(.al-html) code {", css)                # the code chips stay Markdown-only
 
 
 class CliTests(unittest.TestCase):

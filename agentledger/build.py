@@ -62,6 +62,24 @@ def inline_md(text: str) -> str:
 class Rendered:
     title: str
     modules: list[Module]
+    html: bool = False            # an HTML source: laid out by its own CSS, not the viewer's reading typography
+    own_title: bool = False       # the HTML puts its own <h1> before the first module: the page header omits ours
+    width: Optional[int] = None   # <meta name="agentledger:width" content="1100">: the column width it was made for
+
+
+HTML_WIDTH = (600, 1600)  # bounds for <meta name="agentledger:width">
+
+
+def head_styles(text: str) -> str:
+    """The stylesheets of an HTML source's <head> (<style> blocks and <link rel="stylesheet">), kept for the page:
+    reports usually put their CSS there, and only the <body> is used."""
+    hm = re.search(r"<head\b[^>]*>(.*?)</head>", text, re.IGNORECASE | re.DOTALL)
+    if not hm:
+        return ""
+    head = hm.group(1)
+    keep = re.findall(r"<style\b[^>]*>.*?</style>", head, re.IGNORECASE | re.DOTALL)
+    keep += [t for t in re.findall(r"<link\b[^>]*>", head, re.IGNORECASE) if re.search(r"rel=[\"']?stylesheet", t, re.I)]
+    return "\n".join(keep)
 
 
 def render_version(v: Version) -> Rendered:
@@ -73,13 +91,22 @@ def render_version(v: Version) -> Rendered:
         tm = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
         bm = re.search(r"<body[^>]*>(.*)</body>", text, re.IGNORECASE | re.DOTALL)
         body = bm.group(1) if bm else re.sub(r"(?is)<head\b.*?</head>|<!doctype[^>]*>|</?html[^>]*>", "", text)
-        h1 = re.search(r"^\s*<h1[^>]*>(.*?)</h1>", body, re.IGNORECASE | re.DOTALL)
+        body = head_styles(text) + "\n" + body
+        lead = re.match(r"\s*(?:<(?:style|link)\b[^>]*>(?:.*?</style>)?\s*)*", body, re.IGNORECASE | re.DOTALL)
+        h1 = re.match(r"<h1[^>]*>(.*?)</h1>", body[lead.end():], re.IGNORECASE | re.DOTALL)
         title = re.sub(r"<[^>]+>", "", (tm or h1).group(1)).strip() if (tm or h1) else None
-        if h1:
-            body = body[h1.end():]
+        if h1:  # a bare leading <h1> becomes the page title
+            body = body[:lead.end()] + body[lead.end() + h1.end():]
+        intro = re.split(r"<h2\b", body, maxsplit=1, flags=re.IGNORECASE)[0]
+        wm = re.search(r'<meta\s+name="agentledger:width"\s+content="(\d+)"', text, re.IGNORECASE)
+        width = min(max(int(wm.group(1)), HTML_WIDTH[0]), HTML_WIDTH[1]) if wm else None
     if not v.meta.get("allow_scripts"):
         body = sanitize(body)
-    return Rendered(title=v.meta.get("title") or title or v.report.title, modules=split_modules(body))
+    rendered = Rendered(title=v.meta.get("title") or title or v.report.title, modules=split_modules(body))
+    if src.suffix != ".md":
+        rendered.html, rendered.width = True, width
+        rendered.own_title = bool(re.search(r"<h1\b", intro, re.IGNORECASE))
+    return rendered
 
 
 def module_states(cur: Rendered, prev: Optional[Rendered]) -> tuple[dict, list[dict]]:
@@ -247,7 +274,7 @@ class Builder:
             "map": project_flat,
             "crumbs": crumbs,
         }
-        return fill(asset("report.html"), {
+        page = fill(asset("report.html"), {
             "FAVICON": favicon(),
             "TITLE": esc(f"{cur.title} · v{v.number}"),
             "CSS": asset("common.css") + asset("viewer.css"),
@@ -255,6 +282,11 @@ class Builder:
             "DATA": script_json(data),
             "BODY": self.article(project, report, v, cur, states, removed, rows, start),
         })
+        if cur.html:  # the viewer's reading typography is for Markdown; an HTML report brings its own
+            style = f' style="--al-html-width:{cur.width}px"' if cur.width else ""
+            page = page.replace('<article class="al-article" id="al-article">',
+                                f'<article class="al-article al-html" id="al-article"{style}>', 1)
+        return page
 
     def article(self, project: Project, report: Report, v: Version, cur: Rendered, states: dict,
                 removed: list[dict], rows: list[dict], start: Path) -> str:
@@ -267,9 +299,10 @@ class Builder:
         parts = [
             '<header class="al-doc-head">',
             f'<div class="al-kicker">{kicker}</div>',
-            f'<h1 class="al-title">{esc(cur.title)}</h1>',
         ]
-        if meta.get("summary"):
+        if not cur.own_title:  # an HTML report that opens with its own title and lede keeps them, not ours too
+            parts.append(f'<h1 class="al-title">{esc(cur.title)}</h1>')
+        if meta.get("summary") and not cur.own_title:
             parts.append(f'<p class="al-summary">{inline_md(meta["summary"])}</p>')
         info = [f'<span class="al-vtag">v{v.number}</span>',
                 f'<time datetime="{esc(v.created)}">{esc(v.created[:10])}</time>']

@@ -28,6 +28,14 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
    - evidence next to every claim: numbers, tables, commands, file paths, commit hashes;
    - mark modules a human should check: `## Results {#results status=needs-review}`;
    - images or data files: save them next to the draft and pass each with `--asset <path>`.
+   - HTML instead, only when the layout carries the point (a pipeline diagram, cards, a wide table): write
+     `<project>__<report>.html`, with the title in an `<h1>` before the first module and each module under a top-level
+     `<h2 id="...">` (never inside a wrapper element). The page around it is AgentLedger's, so scope every rule to
+     `.al-module`, put CSS variables on `.al-module` (dark mode: `:root[data-theme="dark"] .al-module` and
+     `prefers-color-scheme` with `:root:not([data-theme="light"])`), and never style `html`, `body` or `:root`. Set
+     your own `font-family`, `code` and table styles. The column is 980px; declare another with
+     `<meta name="agentledger:width" content="1100">`, and let rows of boxes wrap. `<style>` and font `<link>` are
+     kept only with `--allow-scripts` (otherwise only inline `style=` survives).
 4. Publish from the repository the report is about, so it records that repo and commit, and attach the trace of
    this session plus any logs the findings rest on (reviewers ask questions that are answered from them):
    `agentledger publish <id> <draft> --author <claude-code|codex> --summary "<one line>" --trace auto [--trace <log>]`

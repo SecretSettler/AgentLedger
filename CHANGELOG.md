@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **HTML reports look as written.** The viewer's reading typography (serif headings, boxed inline `code`, table
+  theme, paragraph spacing) now applies to Markdown reports only, so an HTML report's own CSS is not overridden where
+  it leaves a property unset. HTML reports get a 980px column (`<meta name="agentledger:width">` sets another),
+  keep the `<style>` and stylesheet `<link>` from their `<head>`, and when they open with their own `<h1>` the page
+  header no longer repeats the title and summary. The skill says how to write HTML for AgentLedger.
 - **Ask can compute.** The agent still answers from what it can read (Claude Code: Read, Grep, Glob), but when
   searching cannot settle a question or the answer is a derived value, it runs programs and shows the commands and
   output. They run in the agent's own sandbox: Claude Code's Bash sandbox (`failIfUnavailable`, no unsandboxed
