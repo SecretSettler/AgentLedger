@@ -11,7 +11,7 @@
       "name": "agentledger",
       "source": "./",
       "description": "Publish every report into your private AgentLedger store; review it in the browser; ask the agent that wrote it.",
-      "version": "0.3.0"
+      "version": "0.4.0"
     }
   ]
 }

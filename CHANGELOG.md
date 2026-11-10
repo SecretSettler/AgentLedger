@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - **Link the session, share a reviewed copy.** `publish --link-session auto|PATH|ID` is required: it records which
   Claude Code or Codex session wrote the version (`auto`: the one running the command via `CLAUDE_CODE_SESSION_ID`

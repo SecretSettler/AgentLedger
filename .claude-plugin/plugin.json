@@ -1,6 +1,6 @@
 {
   "name": "agentledger",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Publish every report into your private AgentLedger store; review it in the browser; ask the agent that wrote it.",
   "author": {
     "name": "SecretSettler"
