@@ -10,7 +10,7 @@ reading cannot settle the question or the answer has to be computed.  It runs th
 its own sandbox (see ``sandbox.py``: no network, secrets unreadable, writes only to a
 scratch folder); where that sandbox is not available, Ask stays read-only.
 
-When the report was published with ``--trace auto``, the question goes to the
+When the version links the session that wrote it (``publish --link-session``), the question goes to the
 very session that wrote it, so the agent answers with its full memory of the
 work: Claude Code resumes it as a fork (``--resume --fork-session``, the original
 stays untouched), Codex resumes it in place (``codex exec resume``).  The first

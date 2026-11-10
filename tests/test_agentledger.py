@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 import zipfile
@@ -24,7 +25,7 @@ from agentledger.markdown import render
 from agentledger.modules import split_modules
 from agentledger.sanitize import sanitize
 from agentledger.server import serve
-from agentledger.traces import detect_session
+from agentledger.traces import detect_session, load_trace_state, prepared_dir
 from agentledger.store import LedgerError, Store, init_store
 
 DEMO = Path(__file__).resolve().parent.parent / "agentledger" / "demo"
@@ -35,6 +36,30 @@ def run(*argv) -> tuple[int, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
         code = main(list(argv))
     return code, out.getvalue()
+
+
+def run_err(*argv) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
+SID = "aaaaaaaa-1111-2222-3333-444444444444"
+
+
+def fake_claude_session(config_dir: Path, cwd: Path, sid: str = SID, lines=(), entrypoint: str = "cli",
+                        age: float = 0) -> Path:
+    """A Claude Code transcript for ``cwd`` under ``config_dir/projects`` (as Claude Code lays them out)."""
+    proj = config_dir / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
+    proj.mkdir(parents=True, exist_ok=True)
+    t = proj / f"{sid}.jsonl"
+    head = {"type": "user", "sessionId": sid, "cwd": str(cwd), "entrypoint": entrypoint,
+            "message": {"role": "user", "content": "start"}}
+    t.write_text("\n".join(json.dumps(x) for x in [head, *lines]) + "\n", encoding="utf-8")
+    if age:
+        os.utime(t, (time.time() - age, time.time() - age))
+    return t
 
 
 class MarkdownTests(unittest.TestCase):
@@ -215,6 +240,400 @@ class HtmlReportTests(unittest.TestCase):
         self.assertIn(".al-article:not(.al-html) code {", css)                # the code chips stay Markdown-only
 
 
+class TraceLinkTests(unittest.TestCase):
+    """publish links the session that wrote a report (required) and shares only what --trace says: a reviewed,
+    redacted copy of that session (auto), or files as they are."""
+
+    SECRET = "s3cr3t-value-from-dotenv-XYZ"
+    ENV_SECRET = "envtoken-0123456789abcdef"
+    ANTHROPIC = "sk-ant-api03-" + "A" * 40
+    GITHUB = "ghp_" + "b" * 36
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.claude = self.tmp / "claude"
+        self.work = self.tmp / "work"
+        self.work.mkdir()
+        (self.work / ".env").write_text(f"MY_API_KEY={self.SECRET}\nDEBUG=1\n")
+        self.store = Store(init_store(self.tmp / "store", name="T"))
+        self.draft = self.tmp / "r.md"
+        self.draft.write_text("# R\n\n## One {#one}\n\nx\n")
+        self.env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude), "CODEX_HOME": str(self.tmp / "codex"),
+                                                "DEMO_TOKEN": self.ENV_SECRET})
+        self.env.start()
+        for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+            os.environ.pop(k, None)
+        self.cwd = os.getcwd()
+        os.chdir(self.work)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        self.env.stop()
+        shutil.rmtree(self.tmp)
+
+    def publish(self, *extra):
+        return run_err("--store", str(self.store.root), "publish", "p/r", str(self.draft), *extra)
+
+    def trace(self, *argv):
+        return run_err("--store", str(self.store.root), "trace", *argv)
+
+    def session_lines(self):
+        return [
+            {"type": "session-owner", "accountUuid": "acct-123", "organizationUuid": "org-456", "sessionId": SID},
+            {"type": "api-request-blob", "message": {"content": [{"type": "text", "text": "SYSTEM PROMPT TEXT"}]}},
+            {"type": "attachment", "attachment": {"type": "file", "content": f"MY_API_KEY={self.SECRET}"}},
+            {"type": "user", "isMeta": True, "message": {"role": "user", "content": "MEMORY INDEX TEXT"}},
+            {"type": "user", "sessionId": SID, "message": {"role": "user", "content": [
+                {"type": "text", "text": "please check <system-reminder>REMINDER TEXT</system-reminder> the logs"}]}},
+            {"type": "assistant", "sessionId": SID, "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "PRIVATE REASONING"},
+                {"type": "text", "text": "Reading the config."},
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": f"curl -H 'Authorization: Bearer {self.ENV_SECRET}'"}}]}},
+            {"type": "user", "sessionId": SID, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": f"key={self.SECRET} anthropic={self.ANTHROPIC} gh={self.GITHUB} tokens: 123456789012"}]}},
+        ]
+
+    # ---------------------------------------------------------------- linking
+    def test_publish_requires_a_linked_session(self):
+        with self.assertRaises(SystemExit):
+            self.publish()
+
+    def test_auto_takes_the_session_the_agent_names(self):
+        fake_claude_session(self.claude, self.work, sid=SID, age=600)
+        fake_claude_session(self.claude, self.work, sid="bbbbbbbb-1111-2222-3333-444444444444")   # newer
+        os.environ["CLAUDE_CODE_SESSION_ID"] = SID
+        code, out, err = self.publish("--link-session", "auto")
+        self.assertEqual(code, 0, err)
+        self.assertIn("CLAUDE_CODE_SESSION_ID", err)
+        meta = self.store.report("p/r").latest.meta
+        self.assertEqual(meta["session"], {"agent": "claude", "id": SID})
+        self.assertNotIn("traces", meta)                                    # linked, not shared
+
+    def test_auto_without_an_id_takes_the_newest_author_session(self):
+        fake_claude_session(self.claude, self.work, sid=SID, age=600)
+        fake_claude_session(self.claude, self.work, sid="cccccccc-1111-2222-3333-444444444444",
+                            entrypoint="agentledger-ask")
+        code, out, err = self.publish("--link-session", "auto")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store.report("p/r").latest.meta["session"]["id"], SID)   # Ask's own session left out
+        self.assertIn("most recently active", err)
+
+    def test_auto_takes_the_codex_thread_id(self):
+        tid = "01a1c2af-bf61-7ec3-94ba-b54013298128"
+        d = self.tmp / "codex" / "sessions" / "2026" / "11" / "09"
+        d.mkdir(parents=True)
+        (d / f"rollout-2026-11-09T23-41-00-{tid}.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": tid, "cwd": str(self.work)}}) + "\n")
+        os.environ["CODEX_THREAD_ID"] = tid
+        code, out, err = self.publish("--link-session", "auto")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store.report("p/r").latest.meta["session"], {"agent": "codex", "id": tid})
+
+    def test_link_by_path_or_id_and_the_errors(self):
+        t = fake_claude_session(self.claude, self.work)
+        self.assertEqual(self.publish("--link-session", SID)[0], 0)
+        self.assertEqual(self.publish("--link-session", str(t))[0], 0)
+        copy = self.tmp / "copy.jsonl"
+        shutil.copy(t, copy)
+        for bad in (str(copy), "dddddddd-1111-2222-3333-444444444444"):
+            self.assertEqual(self.publish("--link-session", bad)[0], 2, bad)
+        shutil.rmtree(self.claude)
+        code, out, err = self.publish("--link-session", "auto")
+        self.assertEqual(code, 2)
+        self.assertIn("found no Claude Code or Codex session", err)
+
+    # ---------------------------------------------------------------- the shared copy
+    def test_prepare_keeps_the_conversation_and_redacts(self):
+        fake_claude_session(self.claude, self.work, lines=self.session_lines())
+        code, out, err = self.trace("prepare", "p/r", "--link-session", SID)
+        self.assertEqual(code, 0, err)
+        state = load_trace_state(self.store.root, "p/r")
+        text = Path(state["path"]).read_text()
+        for gone in (self.SECRET, self.ENV_SECRET, self.ANTHROPIC, self.GITHUB, "acct-123", "org-456", "SYSTEM PROMPT",
+                     "MEMORY INDEX", "REMINDER TEXT", "PRIVATE REASONING"):
+            self.assertNotIn(gone, text, gone)
+        for kept in ("please check", "the logs", "Reading the config.", '"name": "Bash"', "[REDACTED:MY_API_KEY]",
+                     "[REDACTED:DEMO_TOKEN]", "[REDACTED:anthropic-key]", "[REDACTED:github-token]",
+                     "tokens: 123456789012"):
+            self.assertIn(kept, text, kept)
+        self.assertIn("known secret MY_API_KEY", state["findings"])
+        self.assertIn("dropped assistant thinking blocks", out)
+
+    def test_trace_auto_shares_only_an_approved_copy(self):
+        fake_claude_session(self.claude, self.work, lines=self.session_lines())
+        code, out, err = self.publish("--link-session", SID, "--trace", "auto")
+        self.assertEqual(code, 2)
+        self.assertIn("reviewed copy", err)                                 # nothing prepared
+        self.trace("prepare", "p/r", "--link-session", SID)
+        code, out, err = self.publish("--link-session", SID, "--trace", "auto")
+        self.assertEqual(code, 2)
+        self.assertIn("not been reviewed and approved", err)
+        self.assertEqual(self.trace("approve", "p/r")[0], 0)
+        path = Path(load_trace_state(self.store.root, "p/r")["path"])
+        with path.open("a") as fh:                                          # edited after approval
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "late edit"}}) + "\n")
+        code, out, err = self.publish("--link-session", SID, "--trace", "auto")
+        self.assertEqual(code, 2)
+        self.assertIn("changed after it was approved", err)
+        self.assertEqual(self.trace("approve", "p/r")[0], 0)
+        other = fake_claude_session(self.claude, self.work, sid="eeeeeeee-1111-2222-3333-444444444444")
+        code, out, err = self.publish("--link-session", str(other), "--trace", "auto")
+        self.assertEqual(code, 2)
+        self.assertIn("prepare it again for the linked session", err)
+        code, out, err = self.publish("--link-session", SID, "--trace", "auto")
+        self.assertEqual(code, 0, err)
+        v = self.store.report("p/r").latest
+        shared = gzip.open(v.path / v.meta["traces"][0]["path"], "rt").read()
+        self.assertIn("late edit", shared)
+        self.assertNotIn(self.SECRET, shared)
+        self.assertEqual(v.meta["session"]["id"], SID)
+        self.assertFalse(prepared_dir(self.store.root, "p/r").exists())    # used up: the next version prepares its own
+
+    def test_approve_refuses_a_copy_with_secrets_left(self):
+        fake_claude_session(self.claude, self.work, lines=self.session_lines())
+        self.trace("prepare", "p/r", "--link-session", SID)
+        path = Path(load_trace_state(self.store.root, "p/r")["path"])
+        with path.open("a") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": f"oops {self.SECRET}"}}) + "\n")
+        code, out, err = self.trace("approve", "p/r")
+        self.assertEqual(code, 2)
+        self.assertIn("known secret MY_API_KEY", err)
+
+    def test_trace_path_is_shared_as_it_is_with_a_warning(self):
+        fake_claude_session(self.claude, self.work)
+        log = self.tmp / "run.log"
+        log.write_text(f"token={self.ENV_SECRET}\n")
+        code, out, err = self.publish("--link-session", SID, "--trace", str(log))
+        self.assertEqual(code, 0, err)
+        self.assertIn("attached as it is", err)
+        v = self.store.report("p/r").latest
+        self.assertIn(self.ENV_SECRET, gzip.open(v.path / v.meta["traces"][0]["path"], "rt").read())
+        self.assertEqual(run_err("trace", "check", str(log))[0], 1)
+        clean = self.tmp / "clean.log"
+        clean.write_text("all good\n")
+        self.assertEqual(run_err("trace", "check", str(clean))[0], 0)
+
+    def test_redaction_rules_catch_secrets_not_code_or_settings(self):
+        from agentledger.redact import Scrubber, known_secrets
+        env = self.tmp / "deploy"
+        env.mkdir()
+        (env / ".env").write_text("BIND_HOST=127.0.0.1\nTZ=Asia/Shanghai\nRUN_MODE=standard\n"
+                                  "IMAGE=ghcr.io/acme/app:latest\nDB_PASSWORD=hunter2hunter2\n"
+                                  "SESSION_SALT=Zq8vR2kLp9Xw4Tn7Bm3Yc6Hd\n")
+        secrets = known_secrets([self.tmp], environ={"HOME": "/home/x", "SSH_AUTH_SOCK": "/run/user/1/ssh",
+                                                     "GH_TOKEN": "ghs_" + "c" * 36})
+        self.assertEqual(set(secrets.values()), {"DB_PASSWORD", "SESSION_SALT", "GH_TOKEN", "MY_API_KEY"})  # no settings
+        scrub = Scrubber(secrets)
+        cases = {
+            "secrets = known_secrets(roots)": "secrets = known_secrets(roots)",               # code, not a secret
+            '"input_tokens": 123456789012': '"input_tokens": 123456789012',                 # a count
+            "listen 127.0.0.1 in Asia/Shanghai": "listen 127.0.0.1 in Asia/Shanghai",       # plain settings
+            "db hunter2hunter2": "db [REDACTED:DB_PASSWORD]",
+            "api_key=abc123def456ghi789": "api_key=[REDACTED:assigned-secret]",
+            "postgres://app:pa55word@db:5432/x": "postgres://[REDACTED:url-credentials]@db:5432/x",
+            '{"accountUuid":"dba7e5e2-1936-4b70-be2d-97a00e9bb7f8"}': '{"accountUuid":"[REDACTED:account-id]"}',
+            "creator_account_id: 01a1c2af-bf61-7ec3-94ba-b54013298128": "creator_account_id: [REDACTED:account-id]",
+        }
+        for given, want in cases.items():
+            self.assertEqual(scrub(given), want, given)
+        once = scrub("postgres://app:pa55word@db/x")
+        self.assertEqual(scrub(once), once)                                                   # idempotent
+        scrub("mail ada@example.org")
+        self.assertEqual(scrub.hints["e-mail addresses"], 1)                                # flagged, not redacted
+
+    def test_codex_sessions_keep_the_conversation_only(self):
+        from agentledger.redact import sanitize_session
+        src, dest = self.tmp / "rollout.jsonl", self.tmp / "out.jsonl"
+        rows = [
+            {"type": "session_meta", "payload": {"id": "t1", "cwd": "/w", "base_instructions": "BASE PROMPT",
+                                                  "creator_account_id": "acct-9", "creator_user_id": "user-9"}},
+            {"type": "turn_context", "payload": {"cwd": "/w", "sandbox_policy": {}}},
+            {"type": "response_item", "payload": {"type": "message", "role": "developer",
+                                                   "content": [{"type": "input_text", "text": "DEVELOPER TEXT"}]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "<environment_context><cwd>/w</cwd></environment_context>"},
+                {"type": "input_text", "text": "count the lines"}]}},
+            {"type": "response_item", "payload": {"type": "reasoning", "summary": [{"text": "PRIVATE REASONING"}]}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c1",
+                                                   "arguments": json.dumps({"cmd": f"echo {self.ANTHROPIC}"})}},
+            {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "403"}},
+            {"type": "event_msg", "payload": {"type": "token_count"}},
+        ]
+        src.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        counts = sanitize_session(src, dest, "codex", {})
+        text = dest.read_text()
+        for gone in ("BASE PROMPT", "acct-9", "user-9", "DEVELOPER TEXT", "environment_context", "PRIVATE REASONING",
+                     self.ANTHROPIC, "token_count", "sandbox_policy"):
+            self.assertNotIn(gone, text, gone)
+        for kept in ("count the lines", '"call_id": "c1"', "403", "[REDACTED:anthropic-key]", '"cwd": "/w"'):
+            self.assertIn(kept, text, kept)
+        self.assertEqual(counts["kept records"], 4)
+
+
+REVIEWER = r'''#!/usr/bin/env python3
+"""A fake Claude Code / Codex reviewer: redacts a name in the copy the prompt names; logs its argv."""
+import json, os, re, sys
+argv = sys.argv[1:]
+log = os.environ["FAKE_REVIEW_LOG"]
+if argv[:2] == ["debug", "prompt-input"]:          # codex: report the profile it was given
+    prof = next((a.split("=", 1)[1].strip('"') for a in argv if a.startswith("default_permissions=")), None)
+    fs = next((a for a in argv if a.startswith(f"permissions.{prof}.filesystem=")), "")
+    writes = re.findall(r'"([^"]+)"="write"', fs)
+    deny = " The permission profile denies reading these paths." if '"deny"' in fs else ""
+    roots = ", ".join(f"`{w}`" for w in writes)
+    word = "root is" if len(writes) == 1 else "roots are"
+    print(f"`sandbox_mode` is `workspace-write`. Network access is restricted. The writable {word} {roots}.{deny}")
+    sys.exit(0)
+with open(log, "a") as f:
+    f.write(json.dumps({"argv": argv}) + "\n")
+prompt = sys.stdin.read()
+with open(log + ".prompt", "w") as f:
+    f.write(prompt)
+copy = re.search(r"The copy: (\S+)", prompt).group(1)
+if "cannot change files" not in prompt:
+    text = open(copy).read().replace("Ada Lovelace", "[REDACTED:name]")
+    if os.environ.get("FAKE_BREAK_JSONL"):
+        text += "{not json\n"
+    open(copy, "w").write(text)
+answer = "- names: 1 replaced with [REDACTED:name]"
+if "-o" in argv:                                   # codex exec
+    open(argv[argv.index("-o") + 1], "w").write(answer)
+    print(json.dumps({"type": "thread.started", "thread_id": "codex-review-1"}))
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": answer}}))
+else:                                              # claude -p
+    sid = argv[argv.index("--session-id") + 1]
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": sid, "result": answer}))
+'''
+
+
+class TraceReviewTests(unittest.TestCase):
+    """`agentledger trace review` runs Claude Code or Codex over the prepared copy, able to change only its folder."""
+
+    def setUp(self):
+        from agentledger import sandbox
+        self.tmp = Path(tempfile.mkdtemp())
+        self.claude = self.tmp / "claude"
+        self.work = self.tmp / "work"
+        self.work.mkdir()
+        self.store = Store(init_store(self.tmp / "store", name="R"))
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("claude", "codex"):
+            (bin_dir / name).write_text(REVIEWER)
+            (bin_dir / name).chmod(0o755)
+        self.log = self.tmp / "review.log"
+        self.saved_tempdir = tempfile.tempdir
+        (self.tmp / "t").mkdir()
+        tempfile.tempdir = str(self.tmp / "t")
+        self.env = mock.patch.dict(os.environ, {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "CLAUDE_CONFIG_DIR": str(self.claude),
+            "CODEX_HOME": str(self.tmp / "codex"), "HOME": str(self.tmp / "home"), "FAKE_REVIEW_LOG": str(self.log)})
+        self.env.start()
+        for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AGENTLEDGER_ASK_SANDBOX", "FAKE_BREAK_JSONL"):
+            os.environ.pop(k, None)
+        sandbox._AVAILABLE.clear()
+        sandbox._AVAILABLE.update({"claude": True, "codex": True})
+        fake_claude_session(self.claude, self.work, lines=[
+            {"type": "user", "sessionId": SID, "message": {"role": "user", "content": "ask Ada Lovelace about it"}}])
+        self.cwd = os.getcwd()
+        os.chdir(self.work)
+        code, out, err = run_err("--store", str(self.store.root), "trace", "prepare", "p/r", "--link-session", SID)
+        self.assertEqual(code, 0, err)
+        self.copy = Path(load_trace_state(self.store.root, "p/r")["path"])
+        self.folder = prepared_dir(self.store.root, "p/r").resolve()
+
+    def tearDown(self):
+        from agentledger import sandbox
+        os.chdir(self.cwd)
+        self.env.stop()
+        tempfile.tempdir = self.saved_tempdir
+        sandbox._AVAILABLE.clear()
+        shutil.rmtree(self.tmp)
+
+    def review(self, agent):
+        return run_err("--store", str(self.store.root), "trace", "review", "p/r", "--agent", agent)
+
+    def argv(self):
+        return json.loads(self.log.read_text().splitlines()[-1])["argv"]
+
+    def test_claude_reviews_in_its_sandbox_and_may_edit_only_the_copy(self):
+        code, out, err = self.review("claude")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Ada Lovelace", self.copy.read_text())
+        self.assertIn("[REDACTED:name]", self.copy.read_text())
+        argv = self.argv()
+        self.assertIn("Edit", argv[argv.index("--tools") + 1:argv.index("--allowedTools")])
+        self.assertIn("Bash", argv[argv.index("--tools") + 1:argv.index("--allowedTools")])
+        self.assertIn(f"Edit(/{self.folder}/**)", argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")])
+        denied = argv[argv.index("--disallowedTools") + 1:argv.index("--permission-mode")]
+        self.assertNotIn("Edit", denied)
+        self.assertIn("Write", denied)
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        self.assertIn(str(self.folder), settings["sandbox"]["filesystem"]["allowWrite"])
+        self.assertIn(f"Edit(/{self.folder}/**)", settings["permissions"]["allow"])
+        self.assertEqual(argv[argv.index("--add-dir") + 1], str(self.folder))     # not the whole store
+        state = load_trace_state(self.store.root, "p/r")
+        self.assertTrue(state["reviewed"]["changed"])
+        self.assertTrue((self.folder / "review.md").is_file())
+        self.assertIn("trace approve p/r", out)
+        prompt = (self.tmp / "review.log.prompt").read_text()
+        self.assertIn("personal data", prompt)
+        self.assertIn("Edit only that file", prompt)
+
+    def test_a_review_resets_an_earlier_approval(self):
+        self.assertEqual(run_err("--store", str(self.store.root), "trace", "approve", "p/r")[0], 0)
+        self.assertEqual(self.review("claude")[0], 0)
+        draft = self.tmp / "r.md"
+        draft.write_text("# R\n\n## One {#one}\n\nx\n")
+        code, out, err = run_err("--store", str(self.store.root), "publish", "p/r", str(draft), "--link-session", SID,
+                                 "--trace", "auto")
+        self.assertEqual(code, 2)
+        self.assertIn("not been reviewed and approved", err)
+        self.assertEqual(run_err("--store", str(self.store.root), "trace", "approve", "p/r")[0], 0)
+        code, out, err = run_err("--store", str(self.store.root), "publish", "p/r", str(draft), "--link-session", SID,
+                                 "--trace", "auto")
+        self.assertEqual(code, 0, err)
+
+    def test_codex_reviews_under_a_profile_that_writes_the_copy(self):
+        code, out, err = self.review("codex")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Ada Lovelace", self.copy.read_text())
+        argv = self.argv()
+        fs = next(a for a in argv if a.startswith("permissions.agentledger-ask.filesystem="))
+        self.assertIn(f'"{self.folder}"="write"', fs)
+        self.assertNotIn("--sandbox", argv)
+
+    def test_without_a_sandbox_claude_still_edits_and_codex_only_lists(self):
+        os.environ["AGENTLEDGER_ASK_SANDBOX"] = "off"
+        code, out, err = self.review("claude")
+        self.assertEqual(code, 0, err)
+        argv = self.argv()
+        tools = argv[argv.index("--tools") + 1:argv.index("--allowedTools")]
+        self.assertEqual(tools, ["Read", "Grep", "Glob", "Edit"])               # no Bash without the sandbox
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertNotIn("sandbox", json.loads(argv[argv.index("--settings") + 1]))
+        self.assertNotIn("Ada Lovelace", self.copy.read_text())
+        code, out, err = self.review("codex")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.argv()[self.argv().index("--sandbox") + 1], "read-only")
+        self.assertIn("could not change the copy", out)
+        self.assertIn("cannot change files", (self.tmp / "review.log.prompt").read_text())
+
+    def test_a_review_that_breaks_the_file_is_an_error(self):
+        os.environ["FAKE_BREAK_JSONL"] = "1"
+        code, out, err = self.review("claude")
+        self.assertEqual(code, 2)
+        self.assertIn("is not valid JSON", err)
+
+    def test_nothing_to_review(self):
+        shutil.rmtree(self.folder)
+        code, out, err = self.review("claude")
+        self.assertEqual(code, 2)
+        self.assertIn("no prepared trace", err)
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -226,7 +645,10 @@ class CliTests(unittest.TestCase):
     def test_cli_round_trip(self):
         s = str(self.root)
         self.assertEqual(run("init", s, "--name", "CLI")[0], 0)
-        self.assertEqual(run("--store", s, "publish", "demo/benchmark", str(DEMO / "benchmark-v1.md"), "--author", "a")[0], 0)
+        fake_claude_session(self.tmp / "claude", self.tmp)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "claude"), "CLAUDE_CODE_SESSION_ID": SID}):
+            self.assertEqual(run("--store", s, "publish", "demo/benchmark", str(DEMO / "benchmark-v1.md"), "--author", "a",
+                                 "--link-session", "auto")[0], 0)
         self.assertEqual(run("--store", s, "comments", "import", str(DEMO / "comments-v1.csv"))[0], 0)
         code, out = run("--store", s, "comments", "list")
         self.assertIn("c_demo1", out)
@@ -309,9 +731,11 @@ class AutomationTests(unittest.TestCase):
         sh(work, "git", "commit", "-qm", "init")
         os.environ["AGENTLEDGER_STORE"] = str(store)
         cwd = os.getcwd()
+        fake_claude_session(self.tmp / "claude", work)
         try:
             os.chdir(work)
-            code, out = run("publish", "work-repo/findings", str(DEMO / "dna-primer.md"))
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "claude"), "CLAUDE_CODE_SESSION_ID": SID}):
+                code, out = run("publish", "work-repo/findings", str(DEMO / "dna-primer.md"), "--link-session", "auto")
         finally:
             os.chdir(cwd)
         self.assertEqual(code, 0, out)

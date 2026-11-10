@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Link the session, share a reviewed copy.** `publish --link-session auto|PATH|ID` is required: it records which
+  Claude Code or Codex session wrote the version (`auto`: the one running the command via `CLAUDE_CODE_SESSION_ID`
+  or `CODEX_THREAD_ID`, else the directory's most recently active one, never Ask's own), so Ask continues it, and
+  shares nothing. `--trace auto` now shares only a reviewed copy: `agentledger trace prepare` keeps the conversation
+  (no system text, attached files, reasoning, account ids) and redacts secrets (`.env` and credential-named
+  environment values, common key formats, URL credentials), the agent reviews it, `agentledger trace approve`
+  re-checks and records it, and publish refuses a copy that is missing, unapproved, changed since, or of another
+  session. `--trace <path>` attaches as before, with a warning when it spots a credential. `agentledger trace check`
+  scans any file, and `agentledger trace review` has Claude Code or Codex review the copy from the command line, in
+  its sandbox and able to change only the copy (Claude Code: the Edit tool limited to it; Codex: a profile that
+  writes it, verified; without a sandbox Codex only lists what to change).
 - **HTML reports look as written.** The viewer's reading typography (serif headings, boxed inline `code`, table
   theme, paragraph spacing) now applies to Markdown reports only, so an HTML report's own CSS is not overridden where
   it leaves a property unset. HTML reports get a 980px column (`<meta name="agentledger:width">` sets another),

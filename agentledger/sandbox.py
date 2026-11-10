@@ -23,11 +23,12 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -63,6 +64,9 @@ class Policy:
     scratch: Optional[Path]    # the only writable folder; None when the run only reads
     read_only: list[Path]      # writable by default (cwd, --add-dir) but kept read-only
     secrets: list[Path]        # never readable
+    # folders the run may also change, e.g. the session copy `agentledger trace review` edits (Claude Code: with
+    # the Edit tool, limited to them, and sandboxed Bash; Codex: writable in its profile)
+    writes: list[Path] = field(default_factory=list)
 
     @property
     def writable(self) -> bool:
@@ -217,7 +221,7 @@ def claude_settings(pol: Policy) -> dict:
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True,
             "filesystem": {
-                "allowWrite": [str(pol.scratch)],
+                "allowWrite": [str(pol.scratch)] + [str(p) for p in pol.writes],
                 # The shared Claude Code temp folder: other sessions' files (see shared_claude_tmp).
                 "denyWrite": [str(p) for p in pol.read_only] + [str(p) for p in shared_claude_tmp()],
                 "denyRead": secrets,
@@ -225,13 +229,44 @@ def claude_settings(pol: Policy) -> dict:
             "network": {"allowedDomains": []},
         },
         # The sandbox covers Bash only; Read, Grep and Glob follow permission rules.
-        "permissions": {"deny": [_rule(p) for p in pol.secrets]},
+        "permissions": {"deny": [_rule(p) for p in pol.secrets], **({"allow": _edit_rules(pol)} if pol.writes else {})},
     }
 
 
+def _edit_rules(pol: Policy) -> list[str]:
+    """Edit permission rules for ``pol.writes``: the only files the Edit tool may change."""
+    return [f"Edit(//{str(p).lstrip('/')}/**)" for p in pol.writes]
+
+
+def _with_edit(argv: list[str], pol: Policy) -> list[str]:
+    """Load and allow the Edit tool, limited to ``pol.writes`` (it is not covered by the Bash sandbox)."""
+    if not pol.writes:
+        return argv
+    out, i = list(argv), 0
+    tools = out.index("--tools") + 1
+    while tools < len(out) and not out[tools].startswith("--"):
+        tools += 1
+    out[tools:tools] = ["Edit"]
+    allowed = out.index("--allowedTools") + 1
+    while allowed < len(out) and not out[allowed].startswith("--"):
+        allowed += 1
+    out[allowed:allowed] = _edit_rules(pol)
+    d = out.index("--disallowedTools") + 1
+    while d < len(out) and not out[d].startswith("--"):
+        if out[d] == "Edit":
+            del out[d]
+            continue
+        d += 1
+    return out
+
+
 def claude_readonly_argv(argv: list[str], pol: Policy) -> list[str]:
-    """The read-only Claude argv (Read, Grep, Glob) plus Read deny rules, so even reading leaves secrets alone."""
-    return argv + ["--settings", json.dumps({"permissions": {"deny": [_rule(p) for p in pol.secrets]}})]
+    """The read-only Claude argv (Read, Grep, Glob) plus Read deny rules, so even reading leaves secrets alone; with
+    ``pol.writes``, also the Edit tool for those folders only."""
+    settings = {"permissions": {"deny": [_rule(p) for p in pol.secrets],
+                                **({"allow": _edit_rules(pol)} if pol.writes else {})}}
+    return _with_edit(argv, pol) + (["--permission-mode", "dontAsk"] if pol.writes else []) + \
+        ["--settings", json.dumps(settings)]
 
 
 def claude_argv(argv: list[str], pol: Policy) -> list[str]:
@@ -245,14 +280,14 @@ def claude_argv(argv: list[str], pol: Policy) -> list[str]:
             continue
         skip = False
         out.append(a)
-    return out + [
+    return _with_edit(out + [
         "--tools", "Read", "Grep", "Glob", "Bash",
         "--allowedTools", "Read", "Grep", "Glob", "Bash",
         "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
         # dontAsk refuses whatever is not allowed (hosts, unsandboxed retries) instead of waiting on a prompt.
         "--permission-mode", "dontAsk",
         "--settings", json.dumps(claude_settings(pol)),
-    ]
+    ], pol)
 
 
 # ------------------------------------------------------------------ Codex
@@ -268,7 +303,7 @@ def codex_overrides(pol: Policy) -> list[str]:
     """``-c`` overrides defining and selecting a permissions profile: read all but secrets, write only the scratch
     (or nothing, for a read-only policy), no network."""
     fs = {":root": "read", **({str(pol.scratch): "write"} if pol.writable else {}),
-          **{str(p): "deny" for p in pol.secrets}}
+          **{str(p): "write" for p in pol.writes}, **{str(p): "deny" for p in pol.secrets}}
     table = "{" + ",".join(f"{_toml_str(k)}={_toml_str(v)}" for k, v in fs.items()) + "}"
     name = codex_profile(pol)
     return ["-c", f"permissions.{name}.filesystem={table}",
@@ -309,8 +344,11 @@ def profile_holds(text: str, pol: Policy) -> bool:
         return False
     if pol.secrets and "denies reading" not in text:
         return False
-    if pol.writable:
-        return f"writable root is `{pol.scratch}`" in text and "writable roots are" not in text
+    if pol.writable or pol.writes:
+        m = re.search(r"writable roots? (?:is|are) ((?:`[^`]+`(?:, )?)+)", text)
+        roots = set(re.findall(r"`([^`]+)`", m.group(1))) if m else set()
+        want = {str(p) for p in ([pol.scratch] if pol.writable else []) + list(pol.writes)}
+        return roots == want
     return "`sandbox_mode` is `read-only`" in text
 
 

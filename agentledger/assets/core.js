@@ -472,7 +472,7 @@
       '1. Investigate each thread against the report source and the underlying evidence.',
       '2. Answer in place: `agentledger comments reply <id> "<answer>"` (add `--resolve` when settled, `--wontfix` to decline).',
       '3. If the report itself must change: `agentledger draft <report-id> -o draft.md`, edit, then',
-      '   `agentledger publish <report-id> draft.md --changes "<what changed>" --resolves <id>,<id>`.',
+      '   `agentledger publish <report-id> draft.md --link-session auto --changes "<what changed>" --resolves <id>,<id>`.',
       '4. Commit and push the store so reviewers see the new version and replies.');
     return out.join('\n') + '\n';
   };
