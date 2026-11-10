@@ -91,7 +91,7 @@
   function renderReports() {
     if (!D.projects.length) {
       return main.replaceChildren(h('div.al-empty-big', null, h('p', null, 'No reports yet.'),
-        h('p', null, 'Have an agent publish one: ', h('code', null, 'agentledger publish <project>/<report> report.md'))));
+        h('p', null, 'Have an agent publish one: ', h('code', null, 'agentledger publish <project>/<report> report.md --link-session auto'))));
     }
     const sections = [];
     for (const p of D.projects) {

@@ -100,9 +100,10 @@ it a private remote, e.g. `gh repo create my-agent-ledger --private --source ~/a
 
 <p align="center"><img alt="How AgentLedger works" src="docs/images/how-it-works.png" width="900"></p>
 
-1. **Publish.** The agent writes Markdown and runs `agentledger publish <repo>/<topic> draft.md --trace auto`. The CLI
-   files it as the next version (`v001`, `v002`, …), records the repo, branch and commit it describes, attaches the
-   transcript of the session that wrote it (gzipped), and remembers that session's id.
+1. **Publish.** The agent writes Markdown and runs `agentledger publish <repo>/<topic> draft.md --link-session auto`.
+   The CLI files it as the next version (`v001`, `v002`, …), records the repo, branch and commit it describes, and
+   links the session that wrote it (its id only). With `--trace auto` it also shares a reviewed, redacted copy of that
+   session (see [Writing reports](#writing-reports)).
 2. **Review.** `agentledger open` serves the store on `localhost` and opens the report. Every `##` section is a module
    you can comment on, link to and compare across versions.
 3. **Comment.** Select any text and press **Comment**. Comments are saved into the version's `comments.csv`, through
@@ -179,8 +180,18 @@ The skill tells the agent all of this; it's here for when you write one yourself
 - One `##` per module with a stable id, `## Results {#results}`, so comments and change tracking follow it across
   versions. Flag modules for a human check with `## Results {#results status=needs-review}`.
 - Evidence next to every claim. Images and data: `--asset <path>`; they carry over to later versions.
-- Sub-reports: publish to a longer id, `agentledger publish repo/topic/part part.md`.
-- Traces: `--trace auto` attaches the publishing session's transcript; `--trace <path>` attaches any log or folder.
+- Sub-reports: publish to a longer id, `agentledger publish repo/topic/part part.md --link-session auto`.
+- Sessions: `--link-session auto|PATH|ID` (required) links the session that wrote the report, so Ask on this machine
+  continues it. `auto` is the session running the command (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`), else the
+  most recently active one for the directory (never one of Ask's own); publish prints which. Only the id is recorded.
+- Traces are what a version shares with everyone who can read the store. `--trace auto` shares the linked session as
+  a reviewed copy: `agentledger trace prepare <id> --link-session auto` keeps only the conversation (no system text,
+  attached files, reasoning or account ids) and redacts secrets (values from `.env` files and credential-named
+  environment variables, and common key formats), the agent reviews and edits the copy (or, from the command line,
+  `agentledger trace review <id> --agent claude|codex` has Claude Code or Codex do it in its sandbox, able to change
+  only the copy), `agentledger trace approve <id>` checks it again and records it, and publish refuses a copy that is
+  missing, unapproved or changed since.
+  `--trace <path>` attaches any log or folder as it is.
 - HTML reports keep their own CSS (from `<head>` too) and their own `<h1>`, in a 980px column
   (`<meta name="agentledger:width" content="1100">` sets another); the reading typography is for Markdown only. Scope
   the CSS to `.al-module`, never `html`, `body` or `:root`, and put each module under a top-level `<h2 id>`.
@@ -253,6 +264,11 @@ them return to the page; unrelated private threads stay private. Agents review t
   credentials unreadable; read-only where no sandbox is available). It is only served to requests from the machine
   itself; `--share` exposes reading and commenting, never Ask. Shared mode accepts IP addresses and this
   machine's names only, which blocks DNS rebinding.
+- Traces are shared with everyone who can read the store, and with whoever you `share` a report to. `--trace auto`
+  shares a reviewed, redacted copy of the session. `--trace <path>` attaches the file as it is: it may hold secrets
+  or personal data (publish warns when it spots a credential, and `agentledger trace check <file>` looks for them),
+  so the choice is yours. Once a store is pushed, deleting a trace leaves it in the git history: rotate any secret
+  that got in.
 - Report HTML passes an allow-list sanitiser (no scripts, handlers, frames, forms or `javascript:` URLs); `--allow-scripts`
   skips it for reports you fully trust.
 - Don't publish a store through githack or GitHub Pages: both make the files public.
@@ -265,7 +281,9 @@ them return to the page; unrelated private threads stay private. Agents review t
 | `setup [path]` | One-time setup: link or create the store; install the skill for Claude Code and Codex |
 | `open [report-id \| file.agentledger.zip]` | Serve on this machine and open the dashboard, a report, or a shared report (`--share`, `--ask`, `--port`, `--into`) |
 | `demo` | Build a sample store and open it (`--ask claude` to try a real agent) |
-| `publish <id> <file\|folder>` | New report or new version (`--trace auto\|PATH --summary --about --changes --resolves --asset --tag`) |
+| `publish <id> <file\|folder>` | New report or new version (`--link-session auto\|PATH\|ID` required; `--trace auto\|PATH --summary --about --changes --resolves --asset --tag`) |
+| `trace prepare <id> --link-session …` / `review <id>` / `approve <id>` | Write the redacted copy of a session that `publish --trace auto` shares, have an agent review it (`--agent claude\|codex`), and approve it |
+| `trace check <file>…` | Look for secrets and credentials in files (exit 1 if any) |
 | `sync [-m msg]` | Pull, rebuild, commit and push the store |
 | `ask <comment-id>` | Have the agent answer a thread (`--backend`, `--cmd`, `--print-prompt`) |
 | `comments list [id]` | Threads for agents (`--status open\|waiting\|closed\|all`, `--format md\|json\|csv`) |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
 from . import __version__
 from . import comments as cm
@@ -19,11 +21,11 @@ from .build import build
 from . import sandbox
 from .ask import (CODEX_FLAGS, AskError, answer_thread, build_prompt, plan, repo_checkout, resolve_backend,
                   review_key, thread_of)
-from .traces import detect_session, human_size, session_info
-from .store import (
-    CONFIG_NAME, GENERATED_OR_SOURCE, PROJECTS, SLUG_RE, VERSION_DIR_RE, LedgerError, Store, check_slug, source_line,
-    find_root, init_store, read_json, user_config_path, write_json,
-)
+from .traces import (approve_trace, approved_trace, detect_session, discard_trace, human_size, link_session,
+                     load_trace_state, prepare_trace, session_info)
+from .store import (check_slug, CONFIG_NAME, find_root, GENERATED_OR_SOURCE, init_store, LedgerError,
+                   parse_report_id, PROJECTS, read_json, SLUG_RE, source_line, Store, user_config_path,
+                   VERSION_DIR_RE, write_json)
 
 TEMPLATE = """---
 title: {title}
@@ -100,7 +102,7 @@ def cmd_init(args) -> int:
     store = Store(root)
     build(store)
     print(f"initialised store at {root}")
-    print("next: agentledger publish <project>/<report> report.md")
+    print("next: agentledger publish <project>/<report> report.md --link-session auto")
     return 0
 
 
@@ -133,26 +135,131 @@ def git_context(cwd: Path, store: Store) -> dict | None:
     }
 
 
-def resolve_traces(values) -> tuple[list[Path], dict | None]:
-    """Trace paths to attach, and the agent session behind ``--trace auto`` (resumed later by Ask)."""
-    out, session = [], None
+def linked_session(value: str) -> tuple[Path, dict]:
+    """``--link-session``: the session that wrote the report (Ask on this machine continues it)."""
+    try:
+        transcript, info, how = link_session(value)
+    except ValueError as exc:
+        raise LedgerError(str(exc)) from exc
+    print(f"  linked: {info['agent']} session {info['id']}  ({how})", file=sys.stderr)
+    return transcript, info
+
+
+def secret_roots(store: Store, session: Optional[dict]) -> list[Path]:
+    """Where known secrets come from: .env files near the work (here, the session's directory) and the store."""
+    roots = [Path.cwd(), store.root]
+    if session and session.get("cwd"):
+        roots.append(Path(session["cwd"]))
+    return roots
+
+
+def shared_traces(store: Store, report_id: str, values: list[str], session: dict) -> tuple[list[Path], bool]:
+    """``--trace``: what this version shares.  ``auto`` = the approved copy of the linked session; a path = as is."""
+    from .redact import known_secrets, scan_file
+
+    out, auto = [], False
     for value in values or []:
         if value == "auto":
-            found = detect_session(Path.cwd())
-            if found:
-                out.append(found)
-                session = session_info(found)
-            else:
-                print("note: --trace auto found no Claude Code or Codex session for this directory; publishing without it",
-                      file=sys.stderr)
-        else:
-            out.append(Path(value).expanduser())
-    return out, session
+            try:
+                out.append(approved_trace(store.root, report_id, session))
+            except ValueError as exc:
+                raise LedgerError(str(exc)) from exc
+            auto = True
+            continue
+        path = Path(value).expanduser()
+        if not path.exists():
+            raise LedgerError(f"--trace {value}: no such file or folder")
+        out.append(path)
+        files = [path] if path.is_file() else [f for f in path.rglob("*") if f.is_file()]
+        secrets = known_secrets(secret_roots(store, session))
+        hits = sum((scan_file(f, secrets) for f in files if f.suffix != ".gz"), Counter())
+        if hits:
+            print(f"warning: {value} is attached as it is, and looks like it holds "
+                  + ", ".join(f"{k} ×{n}" for k, n in hits.items())
+                  + "; everyone who can read the store will see it", file=sys.stderr)
+    return out, auto
+
+
+def cmd_trace_prepare(args) -> int:
+    store = open_store(args)
+    report_id = "/".join(parse_report_id(args.report))
+    transcript, session = linked_session(args.link_session)
+    state = prepare_trace(store.root, report_id, transcript, session, secret_roots(store, session))
+    f = state["findings"]
+    print(f"prepared {state['path']}")
+    print(f"  kept {f.pop('kept records', 0)} records (user and assistant messages, tool calls and results)")
+    for k, n in sorted(f.items()):
+        print(f"  {k}: {n}")
+    print("Review it before sharing (search the file, do not rely on memory): remove or replace personal data, "
+          "credentials the program missed, other people's data, and work unrelated to the report. Then run "
+          f"`agentledger trace approve {report_id}` and publish with `--trace auto`.")
+    return 0
+
+
+def cmd_trace_review(args) -> int:
+    from .review import review_trace
+
+    store = open_store(args)
+    report_id = "/".join(parse_report_id(args.report))
+    backend = resolve_backend(args.agent)
+    if backend is None:
+        raise LedgerError("no agent to review with: install Claude Code (`claude`) or Codex (`codex`)")
+    try:
+        out = review_trace(store, report_id, backend, timeout=args.timeout,
+                           on_progress=lambda m: print(f"  … {m}", file=sys.stderr))
+    except AskError as exc:
+        raise LedgerError(str(exc)) from exc
+    print(out["answer"].strip())
+    print(f"\n{backend.name} {'changed' if out['changed'] else 'did not change'} {out['copy']}; notes: {out['notes']}")
+    if not out["can_edit"]:
+        print("It could not change the copy here (no sandbox): make the changes it lists yourself.")
+    if out["left"]:
+        print("The program still finds: " + ", ".join(f"{k} ×{n}" for k, n in out["left"].items()))
+    print(f"Check the copy, then `agentledger trace approve {report_id}` and publish with `--trace auto`.")
+    return 0
+
+
+def cmd_trace_approve(args) -> int:
+    store = open_store(args)
+    report_id = "/".join(parse_report_id(args.report))
+    state = load_trace_state(store.root, report_id) or {}
+    try:
+        state = approve_trace(store.root, report_id, secret_roots(store, {"cwd": state.get("cwd")}))
+    except ValueError as exc:
+        raise LedgerError(str(exc)) from exc
+    print(f"approved {state['path']} (sha256 {state['approved']['sha256'][:12]}); "
+          f"`agentledger publish {report_id} ... --trace auto` shares exactly this file")
+    return 0
+
+
+def cmd_trace_check(args) -> int:
+    from .redact import known_secrets, scan_file
+
+    store = None
+    try:
+        store = open_store(args)
+    except LedgerError:
+        pass
+    secrets = known_secrets([Path.cwd()] + ([store.root] if store else []))
+    found = 0
+    for name in args.files:
+        path = Path(name).expanduser()
+        files = [path] if path.is_file() else [f for f in path.rglob("*") if f.is_file()]
+        for f in files:
+            hits = scan_file(f, secrets)
+            if hits:
+                found += 1
+                print(f"{f}: " + ", ".join(f"{k} ×{n}" for k, n in hits.items()))
+    if not found:
+        print("no known secrets or credential formats found")
+    return 1 if found else 0
 
 
 def cmd_publish(args) -> int:
     store = open_store(args)
-    traces, session = resolve_traces(args.trace)
+    _, session = linked_session(args.link_session)
+    report_id = "/".join(parse_report_id(args.report))
+    traces, shared_session = shared_traces(store, report_id, args.trace, session)
     v = store.publish(
         args.report, Path(args.source),
         title=args.title, summary=args.summary, about=args.about,
@@ -163,6 +270,8 @@ def cmd_publish(args) -> int:
         context=None if args.no_context else git_context(Path.cwd(), store),
         traces=traces, session=session,
     )
+    if shared_session:
+        discard_trace(store.root, report_id)  # used: the next version prepares its own
     if not args.no_build:
         rebuild(store, quiet=True)
     print(f"published {v.report.id} v{v.number}")
@@ -179,7 +288,9 @@ def cmd_publish(args) -> int:
     for t in v.meta.get("traces", []):
         print(f"          → {t['path']}  ({human_size(t['bytes'])}, home directory shown as ~)")
     if v.meta.get("session"):
-        print(f"  session: {v.meta['session']['agent']} {v.meta['session']['id']}  (Ask in the page continues this session)")
+        sess = v.meta["session"]
+        shared = "shared as a reviewed copy" if shared_session else "not shared"
+        print(f"  session: {sess['agent']} {sess['id']}  (linked: Ask on this machine continues it; {shared})")
     if v.meta.get("resolves"):
         print(f"  resolved: {', '.join(v.meta['resolves'])}")
     if (store.root / ".git").exists():
@@ -719,7 +830,8 @@ def cmd_comments_list(args) -> int:
         print()
     if threads and args.status in ("open", "waiting"):
         print("Reply with `agentledger comments reply <id> \"...\" [--resolve]`; revise with "
-              "`agentledger draft <report>` then `agentledger publish <report> <file> --resolves <ids>`.")
+              "`agentledger draft <report>` then "
+              "`agentledger publish <report> <file> --link-session auto --resolves <ids>`.")
     return 0
 
 
@@ -807,9 +919,14 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--tag", action="append", help="tags (comma separated, repeatable)")
     s.add_argument("--allow-scripts", action="store_true", help="skip HTML sanitising (only for fully trusted reports)")
     s.add_argument("--no-carry", action="store_true", help="do not copy the previous version's assets forward")
+    s.add_argument("--link-session", required=True, metavar="auto|PATH|ID",
+                   help="the Claude Code / Codex session that wrote the report, so Ask continues it (required): "
+                        "'auto' = the session running this command, else the directory's most recent one; or its "
+                        "transcript or id. Only the id is recorded; nothing is shared")
     s.add_argument("--trace", action="append", metavar="auto|PATH",
-                   help="attach the work behind the report: 'auto' = this Claude Code / Codex session's transcript, "
-                        "or a log file / folder (repeatable)")
+                   help="share the work behind the report with whoever reads the store: 'auto' = the linked session's "
+                        "reviewed copy (agentledger trace prepare / approve); PATH = a log file or folder, attached as "
+                        "it is (it may hold private data) (repeatable)")
     s.add_argument("--no-context", action="store_true", help="do not record the git repo/commit publish ran in")
     s.add_argument("--no-build", action="store_true")
     s.set_defaults(func=cmd_publish)
@@ -919,6 +1036,25 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("--open", action="store_true", help="open the dashboard in a browser")
     serve_options(s)
     s.set_defaults(func=cmd_serve, path=None)
+
+    t = sub.add_parser("trace", help="prepare, approve or check the session copy a report shares (publish --trace auto)")
+    tsub = t.add_subparsers(dest="tcmd", required=True, metavar="action")
+    s = tsub.add_parser("prepare", help="write a shareable copy of the session: the conversation only, secrets redacted")
+    s.add_argument("report", help="<project>/<report> it is for")
+    s.add_argument("--link-session", required=True, metavar="auto|PATH|ID", help="the session to share (as for publish)")
+    s.set_defaults(func=cmd_trace_prepare)
+    s = tsub.add_parser("review", help="have Claude Code or Codex review the prepared copy in its sandbox, as an agent "
+                                       "publishing a report does (it can change only the copy; approve stays yours)")
+    s.add_argument("report")
+    s.add_argument("--agent", default="auto", choices=["auto", "claude", "codex"])
+    s.add_argument("--timeout", type=float, default=1800)
+    s.set_defaults(func=cmd_trace_review)
+    s = tsub.add_parser("approve", help="mark the prepared copy reviewed (checked again for secrets first)")
+    s.add_argument("report")
+    s.set_defaults(func=cmd_trace_approve)
+    s = tsub.add_parser("check", help="look for secrets and credentials in files (exit 1 if any)")
+    s.add_argument("files", nargs="+")
+    s.set_defaults(func=cmd_trace_check)
 
     s = sub.add_parser("ask", help="have the agent answer a review thread (the same as Ask in the page)")
     s.add_argument("id", help="comment id")

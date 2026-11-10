@@ -36,10 +36,21 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
      your own `font-family`, `code` and table styles. The column is 980px; declare another with
      `<meta name="agentledger:width" content="1100">`, and let rows of boxes wrap. `<style>` and font `<link>` are
      kept only with `--allow-scripts` (otherwise only inline `style=` survives).
-4. Publish from the repository the report is about, so it records that repo and commit, and attach the trace of
-   this session plus any logs the findings rest on (reviewers ask questions that are answered from them):
-   `agentledger publish <id> <draft> --author <claude-code|codex> --summary "<one line>" --trace auto [--trace <log>]`
-   (for a revision add `--changes "<what changed>"`).
+4. Publish from the repository the report is about, so it records that repo and commit. `--link-session auto`
+   (required) links this session, so Ask on this machine continues it; nothing of it is shared. To share it with
+   reviewers too (their questions are answered from it), share a reviewed copy:
+   - `agentledger trace prepare <id> --link-session auto` writes the copy (the conversation only: no system text,
+     attached files or reasoning; secrets and account ids redacted) to `.drafts/<project>__<report>.trace/` and
+     lists what it removed and what to review;
+   - review that file, searching it rather than relying on your memory of the session, which may be compacted:
+     replace personal data (e-mail addresses it lists, names, machine accounts), credentials it missed, other
+     people's data, and work unrelated to the report;
+   - `agentledger trace approve <id>`; then publish with `--trace auto`, which shares exactly the approved file.
+   (From the command line, `agentledger trace review <id> [--agent claude|codex]` runs that review by an agent in its
+   sandbox, able to change only the copy; approving stays a separate step.)
+   `agentledger publish <id> <draft> --author <claude-code|codex> --summary "<one line>" --link-session auto
+   [--trace auto] [--trace <log>]` (for a revision add `--changes "<what changed>"`). `--trace <log>` attaches a
+   file as it is, so attach only logs you have checked (`agentledger trace check <file>` looks for secrets).
 5. `agentledger sync -m "<id> vN: <short title>"` commits and pushes the store.
 6. Answer in chat with a short summary of the findings, the version, and the `github:` link publish printed.
    Mention that `agentledger open <id>` opens it for review, where any passage can be commented on or asked about.
@@ -57,7 +68,7 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
    - add `--resolve` when the answer settles it without changing the report;
    - add `--wontfix` with the reason when you decline.
 5. When the report must change: `agentledger draft <report-id> -o "$(agentledger root)/.drafts/<name>.md"`, edit, then
-   `agentledger publish <report-id> <draft> --changes "<what changed and why>" --resolves <id1>,<id2>`.
+   `agentledger publish <report-id> <draft> --link-session auto --changes "<what changed and why>" --resolves <id1>,<id2>`.
    Reply on each resolved thread with where the fix is (module and version).
 6. `agentledger sync -m "<report-id> vN: address review"`.
 
