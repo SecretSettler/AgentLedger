@@ -6,6 +6,15 @@
   question: Enter asks (Shift+Enter for a new line, IME composition is left alone), **Reply only** saves without
   asking. The text being typed survives the panel refreshing, and the cursor returns to the box when the answer
   arrives.
+- **No credentials in a shared report.** `agentledger share` redacts every file it packs (report, data, traces,
+  threads) as `trace prepare` does: secrets known on this machine and common credential formats become
+  `[REDACTED:<name>]`, the home directory `~`, and a raw Claude Code or Codex transcript is cut down to the
+  conversation. The built bundle is scanned again and not written if anything is left (a binary file holding a
+  credential stops the share). Your store is unchanged; `share` lists what it redacted, per file.
+- **Reproduce a shared report.** `agentledger open` prints the repository and commit the report describes with the
+  `git clone`, `checkout` and `link` commands; `agentledger link` says whether the checkout is at that commit.
+- Redaction no longer takes a call (`n_tokens = schedule_for_x(`) for an assigned secret, and no longer counts a
+  JSON-escaped decorator (`\n@pytest.fixture`) as an e-mail address.
 
 ## 0.4.0
 

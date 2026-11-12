@@ -120,7 +120,8 @@ def known_secrets(roots: Iterable[Path], environ: Optional[dict] = None) -> dict
     return found
 
 
-EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+# not after a backslash: in JSON-escaped code, `\n@pytest.fixture` is a decorator on a new line, not an address
+EMAIL = re.compile(r"\b(?<!\\)[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
 
 
 class Scrubber:
@@ -141,8 +142,10 @@ class Scrubber:
             if kind == "assigned-secret":
                 def sub(m):
                     value = m.group(3)
-                    # a value, not code: `secrets = known_secrets(...)` or "input_tokens": 123456789012 are not secrets
-                    if value.startswith("[REDACTED") or not _secret_like(value):
+                    # a value, not code: `secrets = known_secrets(...)` or "input_tokens": 123456789012 are not secrets,
+                    # nor is `n_tokens = schedule_v2_for_x1(` (a call)
+                    if (value.startswith("[REDACTED") or not _secret_like(value)
+                            or m.string[m.end():m.end() + 1] == "("):
                         return m.group(0)
                     self.counts[kind] += 1
                     return f"{m.group(1)}{m.group(2)}[REDACTED:{kind}]"

@@ -229,17 +229,29 @@ The skill tells the agent all of this; it's here for when you write one yourself
 agentledger share repo/topic                     # → repo-topic.agentledger.zip: every version, sub-reports, traces, threads
 # they run, on their machine:
 agentledger open repo-topic.agentledger.zip      # unpacks to ~/.cache/agentledger/shared/…, opens it; Comment and Ask work
-agentledger link repo/topic ~/code/repo          # optional: let their agent read their checkout of the code too
+agentledger link repo/topic ~/code/repo          # to reproduce: their checkout of the code, at the commit open prints
 agentledger --store <printed path> comments export repo/topic -o feedback.csv   # or Export CSV in the page
 # back on your machine:
 agentledger comments import feedback.csv         # their questions and their agent's answers join your threads
 ```
 
 The file holds only that report: not the rest of your store, your local cache or your GitHub settings
-(`--no-traces` and `--no-comments` leave those out too). Traces are agent transcripts, with your home directory shown
-as `~`, so send them only to people you trust. When you share a newer version, they open the new file and keep their
-own comments. On their side every page is sanitised, and their agent works in the unpacked folder: it reads, and runs
-programs only inside its sandbox (see [Asking](#asking)).
+(`--no-traces` and `--no-comments` leave those out too). When you share a newer version, they open the new file and
+keep their own comments. On their side every page is sanitised, and their agent works in the unpacked folder: it
+reads, and runs programs only inside its sandbox (see [Asking](#asking)).
+
+**No credentials travel.** Before zipping, `share` passes every file (report, data, traces, threads) through the same
+redaction as `trace prepare`: the values of secrets known on your machine (`.env` files near the store, the checkouts
+and sessions behind the report, credential-named environment variables) and common key formats (API keys, GitHub and
+cloud tokens, private keys, JWTs, passwords in URLs, `api_key=…` assignments) become `[REDACTED:<name>]`, your home
+directory becomes `~`, and a raw Claude Code or Codex transcript is cut down to the conversation. Then the whole
+bundle, built pages included, is scanned again and nothing is written if anything is left; a binary file that holds a
+credential stops the share. Only the bundle changes, never your store, and `share` lists what it redacted, per file.
+Traces still show the work itself (commands, file contents the agent read), so send them to people you trust.
+
+**Reproducing it.** `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
+and `link` commands; after `link`, their agent reads that checkout and can re-run the analysis there, in its
+sandbox. Publish from inside the repository the report is about, so the commit is recorded.
 
 **Everything else:**
 
@@ -268,8 +280,9 @@ them return to the page; unrelated private threads stay private. Agents review t
   credentials unreadable; read-only where no sandbox is available). It is only served to requests from the machine
   itself; `--share` exposes reading and commenting, never Ask. Shared mode accepts IP addresses and this
   machine's names only, which blocks DNS rebinding.
-- Traces are shared with everyone who can read the store, and with whoever you `share` a report to. `--trace auto`
-  shares a reviewed, redacted copy of the session. `--trace <path>` attaches the file as it is: it may hold secrets
+- Traces are shared with everyone who can read the store, and with whoever you `share` a report to (`share`
+  redacts credentials from everything it packs, see [Sharing](#sharing)). `--trace auto` shares a reviewed, redacted
+  copy of the session. `--trace <path>` attaches the file as it is: it may hold secrets
   or personal data (publish warns when it spots a credential, and `agentledger trace check <file>` looks for them),
   so the choice is yours. Once a store is pushed, deleting a trace leaves it in the git history: rotate any secret
   that got in.

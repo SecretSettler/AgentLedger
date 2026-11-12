@@ -422,8 +422,26 @@ def cmd_share(args) -> int:
     print(f"  {info['versions']} version(s), {info['traces']} trace(s), {info['threads']} review thread(s)"
           + ("" if not args.no_traces else "; traces left out") + ("" if not args.no_comments else "; threads left out"))
     print("  the rest of your store, your local cache and GitHub settings are not included")
+    creds = info["redacted"]
+    if creds:
+        print(f"  credentials: redacted {sum(creds.values())} in {len([f for f, c in info['files'].items() if set(c) - {'home directory paths'}])}"
+              f" file(s): " + ", ".join(f"{k} ×{n}" for k, n in sorted(creds.items(), key=lambda kv: -kv[1])))
+        for f, c in info["files"].items():
+            kinds = {k: n for k, n in c.items() if k != "home directory paths"}
+            if kinds:
+                print(f"    {f}: " + ", ".join(f"{k} ×{n}" for k, n in kinds.items()))
+        print("    (in the bundle only; your store is unchanged)")
+    else:
+        print(f"  credentials: none found in {info['checked']} file(s) (secrets known on this machine and common key formats)")
+    if info["sessions_trimmed"]:
+        print(f"  {info['sessions_trimmed']} raw agent transcript(s) cut down to the conversation "
+              "(no system text, attached files, reasoning or account ids)")
+    if info["home_paths"]:
+        print(f"  {info['home_paths']} path(s) under your home directory shown as ~")
+    if info["emails"]:
+        print(f"  note: {info['emails']} e-mail address(es) left in (not credentials; check them if that matters)")
     if info["traces"]:
-        print("  traces are the agent transcripts behind the report (home directory shown as ~): share them only with people you trust")
+        print("  traces are the agent transcripts and logs behind the report: share them only with people you trust")
     print(f"\nThey run:  agentledger open {out.name}")
     print("Their comments come back as a CSV:  agentledger comments import <their-file>.csv")
     return 0
@@ -440,8 +458,39 @@ def cmd_link(args) -> int:
     ctx = (report.latest.meta.get("context") or {}) if report.latest else {}
     print(f"{report.id}: Ask now also reads {repo}  (kept in .cache, never committed)")
     if ctx.get("commit"):
-        print(f"  the report describes {ctx.get('repo', '')} @ {ctx['commit']}: check that commit out there for exact answers")
+        head = git(repo, "rev-parse", "HEAD")
+        head = head.stdout.strip() if head.returncode == 0 else ""
+        if head and head.startswith(ctx["commit"]):
+            print(f"  it is at {ctx['commit']}, the commit the report describes"
+                  + ("; the report was written with uncommitted changes on top" if ctx.get("dirty") else ""))
+        elif head:
+            print(f"  it is at {head[:12]}, but the report describes {ctx.get('repo', '')} @ {ctx['commit']}: "
+                  f"git -C {shlex.quote(str(repo))} checkout {ctx['commit']}  for exact answers")
+        else:
+            print(f"  the report describes {ctx.get('repo', '')} @ {ctx['commit']}: check that commit out there for exact answers")
     return 0
+
+
+def reproduce_lines(store: Store, report) -> list[str]:
+    """How a reader gets the code a shared report describes, so their agent can check and re-run it."""
+    ctx = (report.latest.meta.get("context") or {}) if report.latest else {}
+    if not ctx.get("commit"):
+        return ["  to reproduce: no repository was recorded for this report; work from the report and its traces"]
+    repo, commit = ctx.get("repo") or "", ctx["commit"]
+    remote = "/" in repo or ":" in repo
+    name = re.sub(r"\.git$", "", repo.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]) or "repo"
+    store_arg = shlex.quote(str(store.root))
+    lines = [f"  to reproduce: the report describes {repo} @ {commit}"
+             + (f" (branch {ctx['branch']})" if ctx.get("branch") else "")]
+    if remote:
+        lines.append(f"    git clone {shlex.quote(repo)} {name} && git -C {name} checkout {commit}")
+    else:
+        lines.append(f"    (no remote was recorded: ask the sender for the {name} repository, then check out {commit})")
+    lines += [f"    agentledger --store {store_arg} link {report.id} {name}",
+              "    then Ask can read that checkout and re-run the analysis there, in your agent's sandbox"]
+    if ctx.get("dirty"):
+        lines.append("    (it was written with uncommitted changes, so the commit alone may not match exactly)")
+    return lines
 
 
 def cmd_open(args) -> int:
@@ -452,6 +501,8 @@ def cmd_open(args) -> int:
 
         store, info = share.unpack(Path(target), Path(args.into) if args.into else None)
         print(f"opened {info['report']} shared from {info.get('from', 'another store')}  →  {store.root}")
+        for line in reproduce_lines(store, store.report(info["report"])):
+            print(line)
         print(f"  send your comments back:  agentledger --store {shlex.quote(str(store.root))} comments export "
               f"{info['report']} -o feedback.csv   (or Export CSV in the page)")
         args.store, args.report = str(store.root), info["report"]
