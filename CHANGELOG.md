@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Follow-up questions in the thread.** Once the agent has answered, a box under the answer takes the next
+  question: Enter asks (Shift+Enter for a new line, IME composition is left alone), **Reply only** saves without
+  asking. The text being typed survives the panel refreshing, and the cursor returns to the box when the answer
+  arrives.
+
 ## 0.4.0
 
 - **Link the session, share a reviewed copy.** `publish --link-session auto|PATH|ID` is required: it records which

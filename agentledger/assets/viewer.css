@@ -433,6 +433,10 @@ mark.al-hl.is-draft { background: var(--al-accent-soft); border-bottom-color: va
 }
 @keyframes al-spin { to { transform: rotate(360deg); } }
 .al-replybox .al-textarea { min-height: 60px; }
+.al-followup { display: grid; gap: 6px; margin-top: 10px; }
+.al-followup .al-textarea { min-height: 38px; padding: 8px 10px; resize: none; overflow-y: auto; }
+.al-followup .al-composer-row { flex-wrap: wrap; }
+@media (pointer: coarse) { .al-followup .al-composer-row .al-muted { display: none; } }
 
 /* Map overlay */
 .al-map { width: min(1000px, 100%); padding: 22px 24px; }

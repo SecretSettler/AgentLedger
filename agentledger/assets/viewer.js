@@ -9,7 +9,9 @@
   const V = D.version.n;
   const comments = new AL.Comments(D.store.key, D.report.id);
   const sync = new AL.Sync(D.store);
-  const ui = { panel: false, filter: 'open', scope: 'all', focus: null, compose: null, kind: 'question', anchors: new Map(), active: 0, asking: new Map() };
+  const ui = { panel: false, filter: 'open', scope: 'all', focus: null, compose: null, kind: 'question', anchors: new Map(), active: 0, asking: new Map(),
+    drafts: new Map(),     // thread id -> unsent follow-up text, so a re-render never loses what is being typed
+    followFocus: null };   // thread whose follow-up box gets the cursor back once the agent has answered
   let reviewer = AL.storage.get('agentledger:name', '');
 
   const moduleById = (id) => modules.find((s) => s.dataset.module === id);
@@ -403,10 +405,17 @@
 
     renderComposer();
     const list = listedThreads();
+    const act = document.activeElement;  // a follow-up being typed keeps its cursor through the re-render
+    const typingIn = act && act.classList.contains('al-followup-input') && threadsBox.contains(act)
+      ? { cid: act.dataset.cid, start: act.selectionStart, end: act.selectionEnd } : null;
     threadsBox.replaceChildren(...(list.length ? list.map(threadEl) : [h('div.al-empty', null,
       ui.filter === 'open' ? 'No open threads. Select any text in the report and press ' : 'Nothing here yet. Select text and press ',
       h('strong', null, 'Comment'), ', or use the ', AL.iconEl('comment'), ' button on a module.')]));
     if (ui.focus) { const el = threadsBox.querySelector(`[data-cid="${CSS.escape(ui.focus)}"]`); if (el) el.classList.add('is-focus'); }
+    if (typingIn) {
+      const ta = threadsBox.querySelector(`.al-followup-input[data-cid="${CSS.escape(typingIn.cid)}"]`);
+      if (ta) { ta.focus({ preventScroll: true }); ta.setSelectionRange(typingIn.start, typingIn.end); }
+    }
 
   }
 
@@ -426,6 +435,7 @@
     const a = ui.anchors.get(r.id) || {};
     const mod = modInfo.get(a.module || r.module);
     const replyBox = h('div.al-replybox', { hidden: true });
+    const follow = followupEl(t);
     const el = h('div.al-thread' + (r.status !== 'open' ? '.is-closed' : ''), { dataset: { cid: r.id } },
       h('div.al-thread-top', null,
         h('span.al-pill.is-' + r.status, null, r.status === 'wontfix' ? "won't fix" : r.status),
@@ -437,10 +447,11 @@
       r.quote ? h('blockquote.al-quote', { title: 'Show in report', onClick: () => go(r.id) }, r.quote) : null,
       msgEl(r, false), ...t.replies.map((x) => msgEl(x, true)),
       askingEl(r.id),
+      follow,
       h('div.al-thread-actions', null,
         btn('go', 'go', () => go(r.id), '.is-small', 'Scroll to the commented text'),
-        btn('reply', 'reply', () => openReply(replyBox, r), '.is-small'),
-        ui.asking.has(r.id) || !sync.askBackend ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
+        follow ? null : btn('reply', 'reply', () => openReply(replyBox, r), '.is-small'),
+        follow || ui.asking.has(r.id) || !sync.askBackend ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
         r.status === 'open'
           ? btn('check', 'resolve', () => setStatus(r, 'resolved'), '.is-small')
           : btn('reopen', 'reopen', () => setStatus(r, 'open'), '.is-small'),
@@ -459,15 +470,57 @@
     return true;
   }
 
+  function postReply(root, text) {
+    const ts = AL.nowIso();
+    comments.put({ id: AL.newId(), reply_to: root.id, report: root.report, version: root.version, module: root.module,
+      body: text, author: reviewer, role: 'human', status: '', created: ts, updated: ts });
+    ui.focus = root.id;
+  }
+
+  // Once the agent has answered in a thread, the thread reads as a conversation: a box under the last answer
+  // takes the next question (Enter asks, Shift+Enter breaks the line); "Reply only" saves without asking.
+  function followupEl(t) {
+    const r = t.root;
+    if (!sync.askBackend || r.status !== 'open' || ui.asking.has(r.id) || !t.replies.some((x) => x.role === 'agent')) return null;
+    const last = t.replies[t.replies.length - 1];
+    const pending = last.role !== 'agent';  // a reply the agent has not answered yet: Ask with an empty box answers it
+    const ta = h('textarea.al-textarea.al-followup-input', { rows: 1, dataset: { cid: r.id }, 'aria-label': 'Follow-up question',
+      placeholder: pending ? `Press Ask to have ${askName()} answer your reply, or add to it…` : `Ask ${askName()} a follow-up…` });
+    ta.value = ui.drafts.get(r.id) || '';
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(ta.scrollHeight + 2, 220)}px`; };
+    const take = () => {  // the typed text, posted as a reply; null when nothing should be sent
+      const text = ta.value.trim();
+      if (!text || needName()) return null;
+      ui.drafts.delete(r.id);
+      postReply(r, text);
+      return text;
+    };
+    const ask = () => {
+      if (!ta.value.trim() && !pending) return ta.focus();
+      if (ta.value.trim() && !take()) return;
+      ui.followFocus = r.id;
+      askAgent(r.id);
+    };
+    const replyOnly = () => { if (!ta.value.trim()) return ta.focus(); take(); };
+    ta.addEventListener('input', () => { if (ta.value) ui.drafts.set(r.id, ta.value); else ui.drafts.delete(r.id); grow(); });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); ask(); }  // 229: IME still composing
+      else if (e.key === 'Escape') ta.blur();
+    });
+    requestAnimationFrame(grow);
+    return h('div.al-followup', null, ta,
+      h('div.al-composer-row', null,
+        h('span.al-muted', { title: 'Enter asks; Shift+Enter starts a new line' }, '↵ ask · ⇧↵ new line'),
+        btn('reply', 'Reply only', replyOnly, '.is-small.is-ghost', 'Save your reply without asking'),
+        btn('spark', 'Ask', ask, '.is-small.is-primary', `Send and have ${askName()} answer`)));
+  }
+
   function openReply(box, root) {
     if (!box.hidden) { box.hidden = true; return; }
     const ta = h('textarea.al-textarea', { placeholder: 'Reply… (Ctrl/⌘+Enter to send)' });
     const send = () => {
       if (needName() || !ta.value.trim()) return false;
-      const ts = AL.nowIso();
-      comments.put({ id: AL.newId(), reply_to: root.id, report: root.report, version: root.version, module: root.module,
-        body: ta.value.trim(), author: reviewer, role: 'human', status: '', created: ts, updated: ts });
-      ui.focus = root.id;
+      postReply(root, ta.value.trim());
       return true;
     };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send(); if (e.key === 'Escape') box.hidden = true; });
@@ -1060,7 +1113,17 @@
       if (ui.reveal && ui.panel) {
         const el = threadsBox.querySelector(`.al-thread[data-cid="${CSS.escape(ui.reveal)}"]`);
         if (el) el.scrollIntoView({ block: 'nearest' });
+        const follow = el && el.querySelector('.al-followup');
+        if (follow) follow.scrollIntoView({ block: 'nearest' });  // a long thread: keep the newest answer and the next-question box in view
         ui.reveal = null;
+      }
+      // The agent answered a question asked from a follow-up box: put the cursor back there for the next one,
+      // unless the reviewer has moved on to something else meanwhile.
+      if (ui.followFocus && !ui.asking.has(ui.followFocus)) {
+        const ta = threadsBox.querySelector(`.al-followup-input[data-cid="${CSS.escape(ui.followFocus)}"]`);
+        const idle = !document.activeElement || document.activeElement === document.body;
+        if (ta && idle && ui.panel) ta.focus({ preventScroll: true });
+        ui.followFocus = null;
       }
       const perModule = new Map();
       for (const { root } of AL.threads(reportRows())) {

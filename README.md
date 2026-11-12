@@ -163,7 +163,9 @@ flags anything out of place:
 </table>
 
 - **Comment / Ask:** select text, or use the icon on a module heading. Threads have go, reply, **Reply & ask**, resolve,
-  edit and delete.
+  edit and delete. Once the agent has answered, the thread is a conversation: type the next question in the box under
+  the answer and press <kbd>Enter</kbd> (<kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line, **Reply only** to save
+  without asking).
 - **Navigate without scrolling:** the rail is the report as a vertical timeline; the round stick at the bottom right
   is a joystick (drag up or down to scroll, click to open the pad); the version chain opens any version at the same module.
 - **Shortcuts:** <kbd>j</kbd>/<kbd>k</kbd> modules, <kbd>[</kbd>/<kbd>]</kbd> versions, <kbd>c</kbd> comment,
@@ -211,6 +213,8 @@ The skill tells the agent all of this; it's here for when you write one yourself
   the temp directory; every other tool stays off. When the sandbox cannot start, cannot be verified or would be
   widened, Ask only reads, and confidential files stay unreadable. `serve --ask-read-only`, `ask --read-only` or
   `AGENTLEDGER_ASK_SANDBOX=off` force read-only mode.
+- **Follow-ups.** Ask again in the same thread as often as you like. Every question sends the whole thread, earlier
+  answers included, and continues the version's review session, so the agent keeps the context of the conversation.
 - Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
 - Each version's review session is named `AgentLedger: <report> v<N>` and shows up in `claude --resume` and the IDE's
   session history, so you can open the conversation behind the answers. Questions on one version run one at a time.
