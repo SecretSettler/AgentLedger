@@ -375,6 +375,11 @@ mark.al-hl.is-draft { background: var(--al-accent-soft); border-bottom-color: va
 }
 .al-syncbar .al-btn { margin-left: auto; }
 .al-syncbar code { font-size: 11.5px; }
+.al-gitrow { flex-basis: 100%; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.al-gitrow .al-gitwhere { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-gitrow .al-btn { margin-left: auto; flex: none; }
+.al-pre { max-height: 220px; overflow: auto; padding: 8px 10px; border-radius: 6px; background: var(--al-surface-2);
+  font-family: var(--al-mono); font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .al-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .al-tab {
   height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid transparent;

@@ -18,6 +18,7 @@ from typing import Optional
 from . import __version__
 from . import comments as cm
 from .build import build
+from .gitsync import git
 from . import sandbox
 from .ask import (CODEX_FLAGS, AskError, answer_thread, build_prompt, plan, repo_checkout, resolve_backend,
                   review_key, thread_of)
@@ -104,13 +105,6 @@ def cmd_init(args) -> int:
     print(f"initialised store at {root}")
     print("next: agentledger publish <project>/<report> report.md --link-session auto")
     return 0
-
-
-def git(cwd: Path, *argv: str) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(["git", "-C", str(cwd), *argv], capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return subprocess.CompletedProcess(["git", *argv], 1, "", str(exc))
 
 
 def git_context(cwd: Path, store: Store) -> dict | None:
@@ -300,44 +294,32 @@ def cmd_publish(args) -> int:
 
 def cmd_sync(args) -> int:
     """Pull the store, rebuild, commit everything, push."""
+    from .gitsync import sync
+
     store = open_store(args)
-    root = store.root
-    if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
-        rebuild(store)
+    r = sync(store, args.message, pull=not args.no_pull, push=not args.no_push)
+    if not r["repo"]:
+        print(f"built {r['rebuilt']} file{'s' if r['rebuilt'] != 1 else ''}", file=sys.stderr)
         print("store is not a git repository; rebuilt only")
         return 0
-    upstream = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").returncode == 0
-    has_origin = bool(git(root, "remote").stdout.split())
-    if upstream and not args.no_pull:
-        r = git(root, "pull", "--rebase", "--autostash")
-        if r.returncode != 0:
-            print(r.stdout + r.stderr, file=sys.stderr)
-            print("agentledger: pull failed; resolve it in the store (comments.csv conflicts: keep both sides' rows), then sync again",
-                  file=sys.stderr)
-            return 1
-        store.invalidate()
-    written = build(store)
-    git(root, "add", "-A")
-    if git(root, "diff", "--cached", "--quiet").returncode != 0:
-        msg = args.message or "agentledger: update"
-        r = git(root, "commit", "-m", msg)
-        if r.returncode != 0:
-            print(r.stdout + r.stderr, file=sys.stderr)
-            return 1
-        print(f"committed: {msg}")
-    else:
-        print("nothing to commit" + (f" (rebuilt {len(written)} files)" if written else ""))
-    if args.no_push or not has_origin:
-        return 0
-    ahead = git(root, "rev-list", "--count", "@{u}..HEAD") if upstream else None
-    if ahead is not None and ahead.returncode == 0 and ahead.stdout.strip() == "0":
-        print("up to date with the remote")
-        return 0
-    r = git(root, "push") if upstream else git(root, "push", "-u", "origin", "HEAD")
-    if r.returncode != 0:
-        print(r.stdout + r.stderr, file=sys.stderr)
+    if r.get("pulled"):
+        print(f"pulled {r['pulled']} commit{'s' if r['pulled'] != 1 else ''}")
+    if not r["ok"] and r.get("stage") == "pull":
+        print(r.get("output", ""), file=sys.stderr)
+        print(f"agentledger: {r['error']}", file=sys.stderr)
         return 1
-    print("pushed")
+    if r["committed"]:
+        print(f"committed: {r['committed']}")
+    elif r["ok"]:
+        print("nothing to commit" + (f" (rebuilt {r['rebuilt']} files)" if r["rebuilt"] else ""))
+    if not r["ok"]:
+        print(r.get("output", ""), file=sys.stderr)
+        print(f"agentledger: {r['error']}", file=sys.stderr)
+        return 1
+    if r.get("up_to_date"):
+        print("up to date with the remote")
+    elif r["pushed"]:
+        print("pushed")
     return 0
 
 
@@ -983,7 +965,7 @@ def make_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_publish)
 
     s = sub.add_parser("sync", help="pull the store, rebuild, commit everything and push")
-    s.add_argument("-m", "--message", help="commit message (default: 'agentledger: update')")
+    s.add_argument("-m", "--message", help="commit message (default: the reports whose threads changed, else 'agentledger: update')")
     s.add_argument("--no-pull", action="store_true")
     s.add_argument("--no-push", action="store_true")
     s.set_defaults(func=cmd_sync)

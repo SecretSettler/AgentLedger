@@ -162,6 +162,11 @@ flags anything out of place:
   </tr>
 </table>
 
+- **Sync:** the panel's **Sync** button saves your comments, pulls what others pushed, commits (`review: <report> vN
+  by <you>`) and pushes the store, so everyone who can read it sees the review on GitHub or after their own Sync.
+  It is the same as `agentledger sync`, and only the machine running `agentledger serve` gets it: it commits and
+  pushes as you. A push that needs a password fails with git's message instead of waiting; run `agentledger sync`
+  once in a terminal to set up credentials.
 - **Comment / Ask:** select text, or use the icon on a module heading. Threads have go, reply, **Reply & ask**, resolve,
   edit and delete. Once the agent has answered, the thread is a conversation: type the next question in the box under
   the answer and press <kbd>Enter</kbd> (<kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line, **Reply only** to save
@@ -257,8 +262,8 @@ sandbox. Publish from inside the repository the report is about, so the commit i
 
 - **Same network:** `agentledger serve --share` lets teammates read and comment at `http://<your-ip>:8765`.
 - **Remote machine:** `ssh -L 8765:localhost:8765 <host>`, then open `http://localhost:8765` (Ask works through the tunnel).
-- **Through GitHub:** teammates clone the private store and run `agentledger open`; their comments come back with
-  `agentledger sync`. Pages opened from disk can also **Save to GitHub** with a fine-grained token (Contents: read and
+- **Through GitHub:** teammates clone the private store and run `agentledger open`; everyone presses **Sync** in the
+  page (or runs `agentledger sync`) to send their comments and get the others'. Pages opened from disk can also **Save to GitHub** with a fine-grained token (Contents: read and
   write), or **Export CSV** for `agentledger comments import`.
 
 ### Hosted shared comments

@@ -13,6 +13,11 @@
   credential stops the share). Your store is unchanged; `share` lists what it redacted, per file.
 - **Reproduce a shared report.** `agentledger open` prints the repository and commit the report describes with the
   `git clone`, `checkout` and `link` commands; `agentledger link` says whether the checkout is at that commit.
+- **Sync from the page.** A **Sync** button in the review panel saves, pulls, commits (`review: <report> vN by
+  <name>`) and pushes the store, as `agentledger sync` does, so others see the review; it shows whether the store
+  has changes not pushed yet. Only the machine running `agentledger serve` gets it (shared viewers do not), and git
+  never prompts from it: a push that needs credentials fails with git's message. `agentledger sync` without `-m`
+  now names the reports whose threads changed.
 - Redaction no longer takes a call (`n_tokens = schedule_for_x(`) for an assigned secret, and no longer counts a
   JSON-escaped decorator (`\n@pytest.fixture`) as an e-mail address.
 

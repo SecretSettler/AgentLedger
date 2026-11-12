@@ -1726,5 +1726,114 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+class SyncButtonTests(unittest.TestCase):
+    """The page's Sync button: save, pull, commit and push the store, for the machine that runs it only."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.remote = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
+        root = init_store(self.tmp / "store", name="Srv")
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "owner@example.com")
+        self.git("config", "user.name", "owner")
+        self.store = Store(root)
+        self.store.publish("p/r", DEMO / "dna-primer.md")
+        build(self.store)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "init")
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("push", "-q", "-u", "origin", "main")
+        self.servers = []
+
+    def tearDown(self):
+        for httpd in self.servers:
+            httpd.shutdown()
+            httpd.server_close()
+        shutil.rmtree(self.tmp)
+
+    def git(self, *argv, cwd=None):
+        return subprocess.run(["git", "-C", str(cwd or self.tmp / "store"), *argv], capture_output=True, text=True).stdout
+
+    def start(self, **kw):
+        httpd = serve(self.store, port=0, quiet=True, **kw)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.servers.append(httpd)
+        return httpd.server_address[1]
+
+    def call(self, port, path, body=None, host=None):
+        headers = {"X-AgentLedger": "1", "Content-Type": "application/json", **({"Host": host} if host else {})}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers, method="POST" if body is not None else "GET",
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def row(self, cid="c_s1", body="please re-check the primer"):
+        return {"id": cid, "report": "p/r", "version": "1", "body": body, "author": "dan", "role": "human",
+                "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
+
+    def test_sync_saves_commits_and_pushes(self):
+        port = self.start()
+        status, ping = self.call(port, "/__agentledger/ping")
+        self.assertTrue(ping["sync"])
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()], "author": "dan", "report": "p/r"})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["pushed"])
+        self.assertEqual(body["committed"], "review: p/r v1 by dan")
+        self.assertIn("c_s1", {r["id"] for r in body["rows"]})
+        self.assertIn("review: p/r v1 by dan", self.git("--git-dir", str(self.remote), "log", "--oneline", "main", cwd=self.tmp))
+        status, st = self.call(port, "/__agentledger/git")
+        self.assertEqual((st["changed"], st["ahead"]), (0, 0))
+        status, again = self.call(port, "/__agentledger/sync", {"rows": [], "report": "p/r"})
+        self.assertTrue(again.get("up_to_date"))
+        self.assertIsNone(again["committed"])
+
+    def test_sync_pulls_what_others_pushed(self):
+        other = self.tmp / "teammate"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(other)], check=True)
+        mate = Store(other)
+        mate.save_rows([self.row("c_mate", "teammate's question")])
+        self.git("add", "-A", cwd=other)
+        self.git("-c", "user.email=m@example.com", "-c", "user.name=mate", "commit", "-q", "-m", "mate", cwd=other)
+        self.git("push", "-q", cwd=other)
+        port = self.start()
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()], "author": "dan", "report": "p/r"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["pulled"], 1)
+        self.assertTrue(body["pushed"])
+        self.assertTrue({"c_mate", "c_s1"} <= {r["id"] for r in body["rows"]})
+
+    def test_only_this_machine_can_sync(self):
+        port = self.start(share=True)
+        status, ping = self.call(port, "/__agentledger/ping", host="192.168.7.7")   # a teammate on the LAN
+        self.assertFalse(ping["sync"])
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()]}, host="192.168.7.7")
+        self.assertEqual(status, 403)
+        self.assertEqual(self.call(port, "/__agentledger/git", host="192.168.7.7")[0], 403)
+        self.assertEqual(self.git("rev-list", "--count", "HEAD").strip(), "1")
+
+    def test_failed_push_keeps_the_comments_and_says_why(self):
+        self.git("remote", "set-url", "origin", "https://owner:supersecret123@127.0.0.1:9/nowhere.git")
+        self.git("branch", "--unset-upstream")
+        port = self.start()
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()], "author": "dan", "report": "p/r"})
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["stage"], "push")
+        self.assertIn("c_s1", (self.store.root / "projects/p/r/v001/comments.csv").read_text())
+        self.assertEqual(body["committed"], "review: p/r v1 by dan")
+        self.assertNotIn("supersecret123", json.dumps(body))
+
+    def test_commit_message_names_the_reviewed_reports(self):
+        from agentledger.gitsync import remote_label, review_message
+        self.assertEqual(review_message(["projects/a/b/v002/comments.csv", "projects/a/b/v002/index.html"], "ann"),
+                         "review: a/b v2 by ann")
+        self.assertEqual(review_message(["projects/a/v001/report.md"]), "agentledger: update")
+        self.assertEqual(remote_label("git@github.com:me/ledger.git"), "me/ledger")
+        self.assertEqual(remote_label("https://tok@github.com/me/ledger"), "me/ledger")
+
+
 if __name__ == "__main__":
     unittest.main()
