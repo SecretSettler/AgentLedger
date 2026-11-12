@@ -55,7 +55,9 @@ agentledger open        # http://localhost:8765, comment on any line, Ask about 
 ```
 
 When you've commented, tell the agent *"handle the review comments on harness-vs-paper"*. It answers each thread,
-publishes v2 with the fixes, and marks what it resolved.
+publishes v2 with the fixes, and marks what it resolved. To bring someone in, tell it *"share harness-vs-paper with
+Alice"*: it asks who Alice is if it must, then gives a teammate the steps to join the store (Sync in the page sends
+and fetches comments), or packs the one report for someone outside it with credentials removed.
 
 Want to look around first? `agentledger demo` builds a sample store and opens it.
 
@@ -78,7 +80,7 @@ Paste this into Claude Code or Codex:
 ```
 
 On Claude Code 2.1.275 or later, one step does both: `/plugin install agentledger --marketplace SecretSettler/AgentLedger`.
-The plugin adds the skill plus `/agentledger:report`, `/agentledger:review` and `/agentledger:open`; on first use the
+The plugin adds the skill plus `/agentledger:report`, `/agentledger:review`, `/agentledger:share` and `/agentledger:open`; on first use the
 skill offers to install the CLI.
 
 ### 3. Codex

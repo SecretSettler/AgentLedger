@@ -18,6 +18,10 @@
   has changes not pushed yet. Only the machine running `agentledger serve` gets it (shared viewers do not), and git
   never prompts from it: a push that needs credentials fails with git's message. `agentledger sync` without `-m`
   now names the reports whose threads changed.
+- **The skill picks how to share by who it is for:** a teammate gets access to the store (granted by the user, never
+  by the agent) and syncs; someone outside it gets one report as a file, written outside the working repository,
+  with internal threads left out on request; someone on the network gets `serve --share`. New `/agentledger:share`
+  command; `agentledger` alone now shows the store's remote and what is waiting to be pushed.
 - Redaction no longer takes a call (`n_tokens = schedule_for_x(`) for an assigned secret, and no longer counts a
   JSON-escaped decorator (`\n@pytest.fixture`) as an e-mail address.
 

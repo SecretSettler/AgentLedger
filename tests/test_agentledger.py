@@ -1826,6 +1826,15 @@ class SyncButtonTests(unittest.TestCase):
         self.assertEqual(body["committed"], "review: p/r v1 by dan")
         self.assertNotIn("supersecret123", json.dumps(body))
 
+    def test_status_shows_the_remote_and_what_waits(self):
+        code, out = run("--store", str(self.store.root))
+        self.assertIn("remote.git (branch main): nothing waiting to push", out)
+        self.store.save_rows([self.row()])
+        code, out = run("--store", str(self.store.root))
+        self.assertIn("changed file(s), run agentledger sync", out)
+        self.git("remote", "remove", "origin")
+        self.assertIn("no remote yet", run("--store", str(self.store.root))[1])
+
     def test_commit_message_names_the_reviewed_reports(self):
         from agentledger.gitsync import remote_label, review_message
         self.assertEqual(review_message(["projects/a/b/v002/comments.csv", "projects/a/b/v002/index.html"], "ann"),

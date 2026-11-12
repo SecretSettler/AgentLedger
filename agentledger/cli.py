@@ -387,6 +387,18 @@ def cmd_status(args) -> int:
     print(f"  reports  {len(reports)} in {len(store.projects())} project(s), "
           f"{sum(len(r.versions) for r in reports)} version(s)")
     print(f"  threads  {sum(1 for t in threads if t['root']['status'] == 'open')} open, {len(waiting)} waiting on the agent")
+    from .gitsync import status as git_status
+    g = git_status(store.root)
+    if not g["repo"]:
+        print("  git      not a git repository: nobody else can sync with it (git init it and push it to a private remote)")
+    elif not g.get("remote"):
+        print(f"  git      no remote yet: others can't get it until it is pushed to a private repository "
+              f"(e.g. gh repo create <name> --private --source {shlex.quote(str(store.root))} --push)")
+    else:
+        pending = [f"{g['changed']} changed file(s)" if g["changed"] else "",
+                   f"{g['ahead']} commit(s) not pushed" if g.get("ahead") else ""]
+        pending = ", ".join(x for x in pending if x)
+        print(f"  git      {g['remote']} (branch {g['branch']}): " + (f"{pending}, run agentledger sync" if pending else "nothing waiting to push"))
     print("\n  agentledger open        review in the browser (comment, Ask)\n"
           "  agentledger tree        list reports\n"
           "  agentledger --help      everything else")
