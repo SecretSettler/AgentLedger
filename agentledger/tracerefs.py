@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from . import tracebatch
+
 CONTEXT = 3            # lines shown around the cited ones
 MAX_LINES = 60         # lines kept per citation
 MAX_CHARS = 1200       # characters kept per line
@@ -135,6 +137,8 @@ class Linker:
         self._ids: dict[str, str] = {}
         self.budget = PAGE_BUDGET
         self.cited: dict[str, int] = {}  # stored trace path -> how many citations point at it
+        self.batch_cited: dict[str, int] = {}  # trace-store batch tag -> how many citations point into it
+        self.extra: list[str] = []  # problems found only with a fetched copy (not part of the page)
 
     def entry(self, raw: str) -> dict:
         ref = parse(raw)
@@ -142,8 +146,15 @@ class Linker:
             return {"ref": "trace:" + raw, "error": "not a trace citation: write trace:<file>#L<first>-L<last>"}
         found = resolve(self.report, self.v, ref)
         if not found:
+            try:
+                hit = tracebatch.resolve(self.report, self.v, ref.name, ref.version)
+            except tracebatch.BatchError as exc:
+                return {"ref": ref.text(), "name": ref.name, "error": str(exc)}
+            if hit:
+                return self.batch_entry(ref, hit)
             where = f"in v{ref.version}" if ref.version else f"in v{self.v.number} or an earlier version"
-            return {"ref": ref.text(), "name": ref.name, "error": f"no trace named {ref.name} {where}"}
+            batches = " or its trace-store batches" if any(tracebatch.indexes(x) for x in self.report.versions) else ""
+            return {"ref": ref.text(), "name": ref.name, "error": f"no trace named {ref.name} {where}{batches}"}
         x, t, path = found
         out = {"ref": ref.text(), "name": trace_name(t), "version": x.number, "start": ref.start, "end": ref.end,
                "href": self.href_for(path), "path": self.store.repo_path(path), "bytes": t.get("bytes", 0)}
@@ -159,6 +170,22 @@ class Linker:
         self.cited[key] = self.cited.get(key, 0) + 1
         return out
 
+    def batch_entry(self, ref: Ref, hit) -> dict:
+        """A citation into a trace-store batch: where the file is and how to get it; its lines are never put in the
+        page (the raw trace stays as private as its release), only read from this machine's fetched copy."""
+        cache = hit.cache_path(self.store.root)
+        tag = hit.batch["tag"]
+        self.batch_cited[tag] = self.batch_cited.get(tag, 0) + 1
+        if ref.start and cache.is_file():
+            bad = excerpt(cache, ref, context=0, max_lines=1).get("error")
+            if bad:
+                self.extra.append(f"{ref.text()}: {bad} (in the fetched copy of {hit.path})")
+        return {"ref": ref.text(), "name": hit.path, "version": hit.version.number, "start": ref.start, "end": ref.end,
+                "kind": "batch", "cache_href": self.href_for(cache),
+                "batch": {"repo": hit.batch["repo"], "tag": tag, "release_url": hit.batch.get("release_url"),
+                          "run": hit.run["id"], "sha256": hit.sha256, "size": hit.size},
+                "fetch": f"agentledger trace get {self.report.id} '{ref.text()}'"}
+
     def rewrite(self, html: str) -> str:
         def sub(m: re.Match) -> str:
             raw = htmlmod.unescape(m.group(2))
@@ -171,7 +198,7 @@ class Linker:
         return HREF_RE.sub(sub, html)
 
     def problems(self) -> list[str]:
-        return [f"{e['ref']}: {e['error']}" for e in self.refs.values() if "error" in e]
+        return [f"{e['ref']}: {e['error']}" for e in self.refs.values() if "error" in e] + self.extra
 
 
 def check(store, report, v) -> list[str]:

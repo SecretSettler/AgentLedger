@@ -261,7 +261,17 @@ Traces still show the work itself (commands, file contents the agent read), so s
 
 **Reproducing it.** Each claim the report backs with a trace links to the lines it rests on, in the page and in
 `agentledger trace show <report> 'trace:run.log#L24'`, so whoever reproduces it compares result by result, and their
-agent is told which lines each claim cites. `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
+agent is told which lines each claim cites.
+
+Raw traces too large or too private for the store can stay in a **trace store**: TrajFS experiment batches published
+as GitHub releases (one release per batch: `batch.json`, a `capture.json` per run with every file's SHA256, the
+run's TrajFS store in parts). `publish --trace-batch <release link>` records the batch's runs and file lists on the
+version, never the traces, and a citation names a file by its run's path and its path in the run:
+`trace:peer-tool-v7/runs/r1/sessions/<id>/session.v3.jsonl#L2559`. Clicking it shows the batch, run, file and
+SHA256; `agentledger trace get <report> '<ref>'` downloads only that run with the reader's own GitHub access, checks
+every asset and the file against the capture, restores it with TrajFS (`traj`, or `--raw-root` with an original
+copy) and keeps it in the store's `.cache`, where the page, `trace show` and Ask read it. The cited lines of a
+trace-store file are never written into a page, and `serve --share` never serves `.cache` to other machines. `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
 and `link` commands; after `link`, their agent reads that checkout and can re-run the analysis there, in its
 sandbox. Publish from inside the repository the report is about, so the commit is recorded.
 

@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import comments as cm
-from . import tracerefs
+from . import tracebatch, tracerefs
 from . import sandbox
 from .build import build
 from .store import LedgerError, Store, now_iso, read_json, source_line, write_json
@@ -260,7 +260,18 @@ def _ref_line(store: Store, report, v, ref: "tracerefs.Ref", label: str = "") ->
     head = f'- "{label}" → {ref.text()}' if label else f"- {ref.text()}"
     found = tracerefs.resolve(report, v, ref)
     if not found:
-        return f"{head}: does not resolve (no trace by that name)"
+        try:
+            hit = tracebatch.resolve(report, v, ref.name, ref.version)
+        except tracebatch.BatchError as exc:
+            return f"{head}: {exc}"
+        if not hit:
+            return f"{head}: does not resolve (no trace by that name)"
+        cached = hit.cache_path(store.root)
+        where = f"trace store {hit.describe()}"
+        if cached.is_file():
+            return f"{head} = {cached}" + (f", {ref.lines()}" if ref.start else "") + f" ({where}; a verified copy)"
+        return (f"{head}: in the {where}, not fetched on this machine (the reviewer can run "
+                f"`agentledger trace get {report.id} '{ref.text()}'`)")
     x, t, stored = found
     try:
         path = unpacked(store.root, x.path, t)

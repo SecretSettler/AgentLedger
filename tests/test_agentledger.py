@@ -191,6 +191,226 @@ def page_data(page: str) -> dict:
     return json.loads(raw.replace("<\\/", "</").replace("<\\!--", "<!--"))
 
 
+FAKE_TRAJ = """
+import shutil, sys
+from pathlib import Path
+argv = sys.argv[1:]
+assert argv[0] == "extract" and argv[1] == "-S", argv
+store, path, out = Path(argv[2]), argv[3], Path(argv[4])
+src = store / "files" / path
+if not src.is_file():
+    print("no such file in store: " + path, file=sys.stderr); sys.exit(2)
+(out / path).parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(src, out / path)
+"""
+
+
+class FakeRelease:
+    """A trace-store batch release on disk: batch.json, captures, TrajFS parts, checksums; served like GitHub."""
+
+    def __init__(self, root: Path, tag: str, runs: dict):
+        import hashlib, io as _io, tarfile as _tar
+        self.repo, self.tag, self.assets, self.downloads = "o/trace-store", tag, {}, []
+        sha = lambda b: hashlib.sha256(b).hexdigest()
+        batch_runs = []
+        for rid, (source, files) in runs.items():
+            buf = _io.BytesIO()
+            with _tar.open(fileobj=buf, mode="w") as tf:
+                for name, data in [("trace.trajstore/MANIFEST.json", b"{}")] + [
+                        (f"trace.trajstore/files/{p}", d.encode()) for p, d in files.items()]:
+                    info = _tar.TarInfo(name)
+                    info.size = len(data)
+                    tf.addfile(info, _io.BytesIO(data))
+            blob = buf.getvalue()
+            parts = {f"{rid}.trace.trajstore.tar.part{i:04d}": blob[i * 4096:(i + 1) * 4096]
+                     for i in range((len(blob) + 4095) // 4096)}
+            capture = {"schema": 1, "run_id": rid, "source": source, "fingerprint": "fp-" + rid, "trajfs_commit": "abc123",
+                       "files": [{"path": p, "sha256": sha(d.encode()), "size": len(d.encode()), "mode": 420, "mtime_ns": 0}
+                                 for p, d in files.items()]}
+            cap = json.dumps(capture).encode()
+            self.assets[f"{rid}.capture.json"] = cap
+            self.assets.update(parts)
+            batch_runs.append({"id": rid, "source": source, "files": len(files), "fingerprint": "fp-" + rid,
+                               "capture_asset": f"{rid}.capture.json", "parts": sorted(parts),
+                               "asset_hashes": {n: sha(b) for n, b in [(f"{rid}.capture.json", cap), *parts.items()]}})
+        self.assets["batch.json"] = json.dumps({"schema": 1, "id": tag, "runs": batch_runs, "blocked": []}).encode()
+        self.assets["checksums.json"] = json.dumps({n: sha(b) for n, b in self.assets.items()}).encode()
+        self.ids = {n: i + 1 for i, n in enumerate(sorted(self.assets))}
+
+    def github(self):
+        release = self
+
+        class FakeGitHub:
+            def __init__(self, token=None):
+                pass
+
+            def release(self, repo, tag, release_id=None):
+                if (repo, tag) != (release.repo, release.tag):
+                    raise tracebatch.BatchError(f"GitHub answered 404 for {repo}")
+                return {"id": 7, "html_url": f"https://github.com/{repo}/releases/tag/{tag}", "name": tag, "draft": False,
+                        "assets": [{"id": release.ids[n], "name": n, "size": len(b)} for n, b in release.assets.items()]}
+
+            def download(self, repo, asset, dest, expected=None):
+                import hashlib
+                data = release.assets[asset["name"]]
+                release.downloads.append(asset["name"])
+                if expected and hashlib.sha256(data).hexdigest() != expected:
+                    raise tracebatch.BatchError(f"{asset['name']} failed its SHA256 check")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                return dest
+
+        return FakeGitHub
+
+
+from agentledger import tracebatch  # noqa: E402
+
+
+class TraceBatchTests(unittest.TestCase):
+    """Citations into a trace-store batch: the raw trace stays in its release until a reader fetches that run."""
+
+    SESSION = "".join(f'{{"n": {i}, "text": "step {i}"}}\n' for i in range(1, 21))
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.env = mock.patch.dict(os.environ, {"AGENTLEDGER_TRACE_CACHE": str(self.tmp / "dl"), "HOME": str(self.tmp / "home")})
+        self.env.start()
+        self.store = Store(init_store(self.tmp / "store", name="T"))
+        self.release = FakeRelease(self.tmp, "2026-11-11-exp-v1", {
+            "exp-r1-aaa": ("/data/exp/peer/runs/r1", {"sessions/s1/session.v3.jsonl": self.SESSION, "logs/job.log": "ok r1\n"}),
+            "exp-r2-bbb": ("/data/exp/peer/runs/r2", {"sessions/s2/session.v3.jsonl": "x\n", "logs/job.log": "ok r2\n"}),
+        })
+        self.gh = mock.patch.object(tracebatch, "GitHub", self.release.github())
+        self.gh.start()
+        self.traj = self.tmp / "traj"
+        self.traj.write_text(f"#!{sys.executable}\n" + FAKE_TRAJ)
+        self.traj.chmod(0o755)
+        draft = self.tmp / "r.md"
+        draft.write_text("# R\n\n## Results {#results}\n\nThe lead [saw step 3](trace:runs/r1/sessions/s1/session.v3.jsonl#L3), "
+                         "[r2's job](trace:runs/r2/logs/job.log#L1), [either job](trace:logs/job.log#L1) and "
+                         "[nothing](trace:runs/r1/missing.txt#L1).\n")
+        self.v = self.store.publish("p/r", draft)
+
+    def tearDown(self):
+        self.gh.stop()
+        self.env.stop()
+        shutil.rmtree(self.tmp)
+
+    def add(self):
+        return run("--store", str(self.store.root), "trace", "batch", "add", "p/r", "o/trace-store@2026-11-11-exp-v1")
+
+    def page_refs(self):
+        page = (self.store.report("p/r").latest.path / "index.html").read_text()
+        return {e["ref"]: e for e in page_data(page)["traces"]["refs"].values()}, page
+
+    def test_batch_citations_resolve_without_the_raw_trace(self):
+        code, out = self.add()
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 runs, 4 files listed", out)
+        self.assertEqual(self.release.downloads.count("exp-r1-aaa.trace.trajstore.tar.part0000"), 0)   # no raw trace
+        refs, page = self.page_refs()
+        e = refs["trace:runs/r1/sessions/s1/session.v3.jsonl#L3"]
+        self.assertEqual((e["kind"], e["batch"]["run"], e["name"]), ("batch", "exp-r1-aaa", "sessions/s1/session.v3.jsonl"))
+        self.assertNotIn("lines", e)                                   # the trace's text never goes into the page
+        self.assertIn("agentledger trace get p/r 'trace:runs/r1/sessions/s1/session.v3.jsonl#L3'", e["fetch"])
+        self.assertEqual(refs["trace:runs/r2/logs/job.log#L1"]["batch"]["run"], "exp-r2-bbb")
+        self.assertIn("more than one run", refs["trace:logs/job.log#L1"]["error"])
+        self.assertIn("trace-store batches", refs["trace:runs/r1/missing.txt#L1"]["error"])
+        self.assertIn("Trace-store batches", page)
+        self.assertNotIn("step 20", page)                              # a line of the trace the report does not quote
+
+    def test_trace_get_fetches_one_run_and_checks_it(self):
+        self.add()
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "-C", "1", "--traj", str(self.traj))
+        self.assertEqual(code, 0, err)
+        self.assertIn('>3 │ {"n": 3, "text": "step 3"}', out)
+        self.assertIn("verified: SHA256 and size match", err)
+        self.assertNotIn("exp-r2-bbb.trace.trajstore.tar.part0000", self.release.downloads)       # only that run
+        cached = self.store.root / ".cache/trace-store/2026-11-11-exp-v1/exp-r1-aaa/sessions/s1/session.v3.jsonl"
+        self.assertEqual(cached.read_text(), self.SESSION)
+        self.assertTrue(cached.with_name(cached.name + ".receipt.json").is_file())
+        before = len(self.release.downloads)
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L4",
+            "--traj", str(self.traj))
+        self.assertEqual(len(self.release.downloads), before)                                      # already verified
+        code, out = run("--store", str(self.store.root), "trace", "show", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L5")
+        self.assertIn('>5 │', out)
+
+    def test_bytes_that_do_not_match_are_refused(self):
+        self.add()
+        part = "exp-r1-aaa.trace.trajstore.tar.part0000"
+        self.release.assets[part] = self.release.assets[part][:-1] + b"X"
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "--traj", str(self.traj))
+        self.assertNotEqual(code, 0)
+        self.assertIn("SHA256", err)
+        raw = self.tmp / "raw"
+        (raw / "sessions/s1").mkdir(parents=True)
+        (raw / "sessions/s1/session.v3.jsonl").write_text(self.SESSION + "tampered\n")
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "--raw-root", str(raw))
+        self.assertNotEqual(code, 0)
+        self.assertIn("does not match the SHA256", err)
+        (raw / "sessions/s1/session.v3.jsonl").write_text(self.SESSION)
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "--raw-root", str(raw))
+        self.assertEqual(code, 0, err)
+
+    def test_without_traj_it_says_what_is_needed(self):
+        self.add()
+        with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "empty"), "AGENTLEDGER_TRAJ": ""}):
+            code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                     "trace:runs/r1/sessions/s1/session.v3.jsonl#L3")
+        self.assertNotEqual(code, 0)
+        self.assertIn("needs `traj`", err)
+        self.assertIn("abc123", err)                                   # the TrajFS commit the batch was packed with
+
+    def test_ask_is_told_where_the_lines_are(self):
+        from agentledger.ask import build_prompt
+        self.add()
+        self.store.invalidate()                                        # Ask reloads the store before each question
+        row = self.store.add_comment("p/r", "really?", module="results", quote="saw step 3", author="dan")
+        prompt, _ = build_prompt(self.store, row["id"])
+        self.assertIn("not fetched on this machine", prompt)
+        self.assertIn("agentledger trace get p/r 'trace:runs/r1/sessions/s1/session.v3.jsonl#L3'", prompt)
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L3",
+            "--traj", str(self.traj))
+        prompt, _ = build_prompt(self.store, row["id"])
+        self.assertIn(".cache/trace-store/2026-11-11-exp-v1/exp-r1-aaa/sessions/s1/session.v3.jsonl, line 3", prompt)
+
+    def test_publish_records_the_batch(self):
+        fake_claude_session(self.tmp / "claude", self.tmp)
+        draft = self.tmp / "v2.md"
+        draft.write_text("# R\n\n## Results {#results}\n\n[log](trace:runs/r2/logs/job.log#L1)\n")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "claude")}):
+            code, out, err = run_err("--store", str(self.store.root), "publish", "p/r", str(draft), "--link-session", SID,
+                                     "--trace-batch", "https://github.com/o/trace-store/releases/tag/2026-11-11-exp-v1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("trace batch: o/trace-store@2026-11-11-exp-v1", out)
+        self.assertNotIn("citation", err)
+        code, out = run("--store", str(self.store.root), "trace", "batch", "list", "p/r")
+        self.assertIn("v2  o/trace-store@2026-11-11-exp-v1  2 run(s)", out)
+
+    def test_shared_viewers_never_get_the_cache(self):
+        self.add()
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L3",
+            "--traj", str(self.traj))
+        httpd = serve(self.store, port=0, quiet=True, share=True)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+        url = f"http://127.0.0.1:{port}/.cache/trace-store/2026-11-11-exp-v1/exp-r1-aaa/sessions/s1/session.v3.jsonl"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url)) as r:
+                self.assertEqual(r.read().decode(), self.SESSION)           # this machine
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(urllib.request.Request(url, headers={"Host": "192.168.7.7"}))
+            self.assertEqual(caught.exception.code, 403)                    # a teammate on the LAN
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class TraceCitationTests(unittest.TestCase):
     """A claim points at the trace lines behind it: [4721 us](trace:run.log#L51)."""
 

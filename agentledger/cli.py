@@ -19,7 +19,7 @@ from . import __version__
 from . import comments as cm
 from .build import build
 from .gitsync import git
-from . import tracerefs
+from . import tracebatch, tracerefs
 from . import sandbox
 from .ask import (CODEX_FLAGS, AskError, answer_thread, build_prompt, plan, repo_checkout, resolve_backend,
                   review_key, thread_of)
@@ -276,18 +276,88 @@ def cmd_trace_show(args) -> int:
                           f"{report.id} lists the files)")
     found = tracerefs.resolve(report, v, ref)
     if not found:
+        hit = tracebatch.resolve(report, v, ref.name, ref.version)
+        if hit:
+            cached = hit.cache_path(store.root)
+            if not cached.is_file():
+                raise LedgerError(f"{ref.text()} is in the trace store ({hit.describe()}), not on this machine yet: "
+                                  f"agentledger trace get {report.id} '{ref.text()}'")
+            return _print_lines(cached, ref, f"{hit.describe()}  (trace store, v{hit.version.number}"
+                                + (f", {ref.lines()}" if ref.start else "") + ")", args)
         names = sorted({tracerefs.trace_name(t) for x in report.versions for t in x.meta.get("traces", [])})
         raise LedgerError(f"no trace named {ref.name} in {report.id} up to v{v.number}"
                           + (f"; it has: {', '.join(names)}" if names else "; it has no traces"))
     x, t, path = found
+    return _print_lines(path, ref, f"{store.repo_path(path)}  (v{x.number}{', ' + ref.lines() if ref.start else ''})", args)
+
+
+def _print_lines(path: Path, ref, header: str, args) -> int:
     got = tracerefs.excerpt(path, ref, context=args.context, max_lines=args.max_lines)
     if "error" in got:
         raise LedgerError(got["error"])
-    print(f"{store.repo_path(path)}  (v{x.number}{', ' + ref.lines() if ref.start else ''})")
+    print(header)
     width = len(str(got["lines"][-1][0])) if got["lines"] else 1
     for n, text in got["lines"]:
         mark = ">" if ref.start and ref.start <= n <= ref.end else " "
         print(f"{mark}{n:>{width}} │ {text}")
+    return 0
+
+
+def cmd_trace_get(args) -> int:
+    """Fetch a file a citation names from its trace-store batch (only that run), check it and show the lines."""
+    store = open_store(args)
+    report = store.report(args.report)
+    if not report.latest:
+        raise LedgerError(f"{report.id} has no versions yet")
+    v = report.version(args.version) if args.version else report.latest
+    ref = tracerefs.parse(args.ref)
+    if ref is None:
+        raise LedgerError("write the citation as trace:<path>#L<first>-L<last>")
+    if tracerefs.resolve(report, v, ref):
+        return cmd_trace_show(args)  # a trace kept in the store: nothing to fetch
+    try:
+        hit = tracebatch.resolve(report, v, ref.name, ref.version)
+        if not hit:
+            raise LedgerError(f"{ref.name} is not in {report.id}'s traces or its trace-store batches "
+                              f"(agentledger trace batch list {report.id})")
+        path = tracebatch.fetch(store.root, hit, raw_root=Path(args.raw_root).expanduser() if args.raw_root else None,
+                                traj=args.traj, say=lambda s: print(s, file=sys.stderr))
+    except tracebatch.BatchError as exc:
+        raise LedgerError(str(exc)) from exc
+    print(f"verified: SHA256 and size match the capture ({hit.sha256[:12]}…, {hit.size} bytes); "
+          f"kept in {store.rel(path)} (never committed)", file=sys.stderr)
+    return _print_lines(path, ref, f"{hit.describe()}  (trace store, v{hit.version.number}"
+                        + (f", {ref.lines()}" if ref.start else "") + ")", args)
+
+
+def cmd_trace_batch(args) -> int:
+    store = open_store(args)
+    report = store.report(args.report)
+    if args.bcmd == "list":
+        shown = False
+        for x in report.versions:
+            for b in x.meta.get("trace_batches", []):
+                shown = True
+                print(f"v{x.number}  {b['repo']}@{b['tag']}  {b.get('runs', 0)} run(s)  {b.get('release_url', '')}")
+        if not shown:
+            print(f"{report.id} cites no trace-store batch (publish --trace-batch <release link>)")
+        return 0
+    v = report.version(args.version) if args.version else report.latest
+    if v is None:
+        raise LedgerError(f"{report.id} has no versions yet")
+    try:
+        idx = tracebatch.register(v, args.release, store.config.get("trace_store"))
+    except tracebatch.BatchError as exc:
+        raise LedgerError(str(exc)) from exc
+    store.invalidate()
+    report = store.report(report.id)
+    v = report.version(v.number)  # reloaded: its meta now lists the batch
+    rebuild(store, quiet=True)
+    files = sum(len(r["files"]) for r in idx["runs"])
+    print(f"{report.id} v{v.number}: {idx['repo']}@{idx['tag']}  ({len(idx['runs'])} runs, {files} files listed; "
+          "raw traces stay in the release)")
+    for problem in tracerefs.check(store, report, v):
+        print(f"warning: citation {problem}", file=sys.stderr)
     return 0
 
 
@@ -308,6 +378,19 @@ def cmd_publish(args) -> int:
     )
     if shared_session:
         discard_trace(store.root, report_id)  # used: the next version prepares its own
+    batch_failed = False
+    for value in args.trace_batch or []:
+        try:
+            idx = tracebatch.register(v, value, store.config.get("trace_store"))
+            files = sum(len(r["files"]) for r in idx["runs"])
+            print(f"  trace batch: {idx['repo']}@{idx['tag']}  ({len(idx['runs'])} runs, {files} files listed; "
+                  "raw traces stay in the release)")
+        except tracebatch.BatchError as exc:
+            batch_failed = True
+            print(f"agentledger: --trace-batch {value}: {exc}", file=sys.stderr)
+            print(f"  then: agentledger trace batch add {v.report.id} '{value}' --version {v.number}", file=sys.stderr)
+    store.invalidate()
+    v = store.report(v.report.id).version(v.number)  # its meta now lists the batches
     if not args.no_build:
         rebuild(store, quiet=True)
     print(f"published {v.report.id} v{v.number}")
@@ -330,6 +413,8 @@ def cmd_publish(args) -> int:
     if problems:
         print(f"  {len(problems)} trace citation(s) do not resolve: fix them and publish again "
               f"(agentledger trace show {v.report.id} lists the traces)", file=sys.stderr)
+    if batch_failed:
+        return 1
     if v.meta.get("session"):
         sess = v.meta["session"]
         shared = "shared as a reviewed copy" if shared_session else "not shared"
@@ -1029,6 +1114,9 @@ def make_parser() -> argparse.ArgumentParser:
                    help="share the work behind the report with whoever reads the store: 'auto' = the linked session's "
                         "reviewed copy (agentledger trace prepare / approve); PATH = a log file or folder, attached as "
                         "it is (it may hold private data) (repeatable)")
+    s.add_argument("--trace-batch", action="append", metavar="RELEASE",
+                   help="a trace-store batch the report cites (its GitHub release link, or owner/repo@tag): its runs "
+                        "and file lists are recorded, the raw traces stay in the release (repeatable)")
     s.add_argument("--no-context", action="store_true", help="do not record the git repo/commit publish ran in")
     s.add_argument("--no-build", action="store_true")
     s.set_defaults(func=cmd_publish)
@@ -1163,6 +1251,26 @@ def make_parser() -> argparse.ArgumentParser:
     s.add_argument("-C", "--context", type=int, default=3, help="lines of context around the cited ones")
     s.add_argument("--max-lines", type=int, default=200)
     s.set_defaults(func=cmd_trace_show)
+    s = tsub.add_parser("get", help="fetch the file a citation names from its trace-store batch (only that run, "
+                                    "with your own GitHub access), check it byte for byte and print the cited lines")
+    s.add_argument("report")
+    s.add_argument("ref", help="trace:<path>#L<first>-L<last>")
+    s.add_argument("--version", type=int, help="the version citing it (default: the latest)")
+    s.add_argument("-C", "--context", type=int, default=3)
+    s.add_argument("--max-lines", type=int, default=200)
+    s.add_argument("--raw-root", help="the run's original folder, if you have it: read from there instead of the release")
+    s.add_argument("--traj", help="the TrajFS traj binary (default: AGENTLEDGER_TRAJ or traj on PATH)")
+    s.set_defaults(func=cmd_trace_get)
+    s = tsub.add_parser("batch", help="record a trace-store batch on a report version, or list them")
+    bsub = s.add_subparsers(dest="bcmd", required=True, metavar="add|list")
+    b = bsub.add_parser("add", help="record a batch (release link or owner/repo@tag) on a version")
+    b.add_argument("report")
+    b.add_argument("release")
+    b.add_argument("--version", type=int, help="default: the latest")
+    b.set_defaults(func=cmd_trace_batch)
+    b = bsub.add_parser("list")
+    b.add_argument("report")
+    b.set_defaults(func=cmd_trace_batch)
     s = tsub.add_parser("check", help="look for secrets and credentials in files (exit 1 if any)")
     s.add_argument("files", nargs="+")
     s.set_defaults(func=cmd_trace_check)

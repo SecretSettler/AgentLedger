@@ -174,6 +174,11 @@ class LedgerHandler(SimpleHTTPRequestHandler):
             if not self._owner():
                 return self._json(403, {"ok": False, "error": "only the machine running agentledger can sync"})
             return self._json(200, {"ok": True, **gitsync.status(self.store.root)})
+        if path == "/.cache" or path.startswith("/.cache/"):
+            # Machine-local state and fetched raw traces: never for shared viewers (or anyone not on this machine).
+            if not self._owner():
+                return self._json(403, {"ok": False, "error": "not available to shared viewers"})
+            return super().do_GET()
         if path.startswith("/__agentledger/ask/"):
             if not self._guard():
                 return None

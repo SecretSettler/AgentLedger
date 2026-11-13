@@ -809,7 +809,7 @@
     const r = parseRef(raw);
     if (!r) return null;
     const ref = refText(r);
-    const known = Object.values(TRACES.refs).find((e) => e.ref === ref && e.lines);
+    const known = Object.values(TRACES.refs).find((e) => e.ref === ref && (e.lines || e.kind === 'batch'));
     if (known) return known;
     const named = (f) => f.name === r.name || (!r.name.includes('/') && f.name.split('/').pop() === r.name);
     const f = TRACES.files.filter((x) => (!r.version || x.version === r.version) && named(x)).sort((a, b) => b.version - a.version)[0];
@@ -851,28 +851,46 @@
       const hit = box.querySelector('.is-hit');
       if (hit) requestAnimationFrame(() => { box.scrollTop = Math.max(0, hit.offsetTop - box.clientHeight / 3); });
     };
+    const batch = e.kind === 'batch' ? e.batch : null;
+    const src = e.href || e.cache_href;
+    const notFetched = () => {
+      note.replaceChildren('Not on this machine yet. Fetch it with your own access to the trace store: ',
+        h('code', null, e.fetch), ' (it downloads that run only and checks every byte), then open this again.');
+    };
     const more = async () => {
-      if (!canFetchTrace()) { note.textContent = 'Open this page with agentledger open to load more of the trace, or download it.'; return; }
-      note.textContent = 'Loading the trace…';
+      if (!canFetchTrace()) {
+        if (batch) notFetched();
+        else note.textContent = 'Open this page with agentledger open to load more of the trace, or download it.';
+        return;
+      }
+      note.textContent = batch ? 'Looking for the fetched copy…' : 'Loading the trace…';
       try {
-        const all = await loadTrace(e.href);
+        const all = await loadTrace(src);
         const s = e.start || 1, en = e.end || Math.min(all.length, 20);
         if (!span.lo) { span.lo = Math.max(1, s - 3); span.hi = Math.min(all.length, en + 3); }
         span.lo = Math.max(1, span.lo - 40); span.hi = Math.min(all.length, span.hi + 40);
         draw(all.slice(span.lo - 1, span.hi).map((t, i) => [span.lo + i, t.length > 4000 ? t.slice(0, 4000) + ' …' : t]));
         note.textContent = `Lines ${span.lo}–${span.hi} of ${all.length}.`;
         if (e.start && e.start > all.length) note.textContent = `The trace has ${all.length} lines; this citation starts at line ${e.start}.`;
-      } catch (err) { note.textContent = err.message; }
+        if (batch) note.textContent += ' A verified copy fetched on this machine.';
+      } catch (err) { if (batch) notFetched(); else note.textContent = err.message; }
     };
     const body = h('div.al-trace', null,
       h('div.al-trace-where', null, h('code', null, e.ref), e.path ? h('span.al-muted', null, e.path) : null),
+      batch ? h('div.al-trace-batch', null, 'In the trace store: ',
+        batch.release_url ? h('a', { href: batch.release_url, target: '_blank', rel: 'noopener noreferrer' }, `${batch.repo}@${batch.tag}`) : `${batch.repo}@${batch.tag}`,
+        ` · run ${batch.run} · SHA256 ${batch.sha256.slice(0, 12)}… · ${batch.size.toLocaleString()} bytes`) : null,
       e.error ? h('p.al-trace-error', null, `This citation does not resolve: ${e.error}.`) : null,
       e.error && !e.href ? null : box, note,
       e.href ? h('a.al-trace-dl', { href: e.href, download: '' }, AL.iconEl('download'), 'Download the trace') : null);
     if (e.lines) draw(e.lines);
-    else if (e.href) more();
+    else if (src) more();
     const actions = [];
-    if (e.href) actions.push({ label: 'More context', run: () => { more(); return false; } });
+    if (src) actions.push({ label: 'More context', run: () => { more(); return false; } });
+    if (batch && e.fetch) actions.push({ label: 'Copy fetch command', run: () => {
+      AL.copy(e.fetch).then((ok) => AL.toast(ok ? 'Copied: run it where agentledger and traj are installed' : 'Copy failed', ok ? '' : 'error'));
+      return false;
+    } });
     actions.push({ label: 'Copy reference', run: () => {
       AL.copy(`${e.ref}  (${e.path || e.name}${e.start ? ', ' + linesLabel(e) : ''})`)
         .then((ok) => AL.toast(ok ? 'Copied: paste it into a comment or to your own AI' : 'Copy failed', ok ? '' : 'error'));
@@ -881,7 +899,7 @@
     if (sync.askBackend && anchorEl && article.contains(anchorEl) && !e.error) {
       actions.push({ label: 'Ask about these lines', primary: true, run: () => askAboutTrace(e, anchorEl) });
     }
-    AL.modal(`${e.name || 'Trace'} · ${linesLabel(e)}${e.version ? ` · v${e.version}` : ''}`, body, actions, { close: 'Close' });
+    AL.modal(`${(e.name || 'Trace').split('/').pop()} · ${linesLabel(e)}${e.version ? ` · v${e.version}` : ''}`, body, actions, { close: 'Close' });
     const modals = document.querySelectorAll('.al-modal');
     if (modals.length) modals[modals.length - 1].classList.add('al-modal-wide');
   }

@@ -273,7 +273,8 @@ class Builder:
                 for m in cur.modules
             ],
             "removed": removed,
-            "traces": {"refs": linker.refs, "files": self.trace_files(report, v, start, linker)},
+            "traces": {"refs": linker.refs, "files": self.trace_files(report, v, start, linker),
+                       "batches": self.trace_batches(report, v, linker)},
             "comments": rows,
             "map": project_flat,
             "crumbs": crumbs,
@@ -303,6 +304,21 @@ class Builder:
                 out.append({"name": tracerefs.trace_name(t), "version": x.number, "href": href(path, start),
                             "path": self.store.repo_path(path), "bytes": t.get("bytes", 0),
                             "cited": linker.cited.get(str(path), 0)})
+        return out
+
+    def trace_batches(self, report: Report, v: Version, linker) -> list[dict]:
+        """The trace-store batches a reader of version ``v`` can cite from: raw traces kept outside the store."""
+        seen, out = set(), []
+        for x in reversed(report.versions):
+            if x.number > v.number:
+                continue
+            for b in x.meta.get("trace_batches", []):
+                if b.get("tag") in seen:
+                    continue
+                seen.add(b.get("tag"))
+                out.append({"repo": b.get("repo"), "tag": b.get("tag"), "release_url": b.get("release_url"),
+                            "runs": b.get("runs", 0), "version": x.number,
+                            "cited": linker.batch_cited.get(b.get("tag"), 0) if linker else 0})
         return out
 
     def article(self, project: Project, report: Report, v: Version, cur: Rendered, states: dict,
@@ -395,6 +411,15 @@ class Builder:
                 foot.append(f'<li><a href="{esc(href(x.path / t["path"], start))}" download>{esc(name)}</a> '
                             f'<code class="al-tname" title="cite it as">trace:{esc(tracerefs.trace_name(t))}</code> '
                             f'<span class="al-muted">v{x.number} · {human_size(t.get("bytes", 0))}{cites}</span></li>')
+            foot.append("</ul></div>")
+        batches = self.trace_batches(report, v, linker)
+        if batches:
+            foot.append('<div class="al-foot-block"><div class="al-foot-h">Trace-store batches</div><ul class="al-traces">')
+            for b in batches:
+                cites = f' · cited {b["cited"]}×' if b["cited"] else ""
+                foot.append(f'<li><a href="{esc(b["release_url"] or "#")}" rel="noopener noreferrer">{esc(b["tag"])}</a> '
+                            f'<span class="al-muted">{esc(b["repo"])} · {b["runs"]} run{"s" if b["runs"] != 1 else ""} · '
+                            f'v{b["version"]}{cites}</span></li>')
             foot.append("</ul></div>")
         foot.append(f'<div class="al-foot-src">Source: <code>{esc(self.store.repo_path(v.source))}</code> · '
                     f'comments: <code>{esc(self.store.repo_path(v.comments_path))}</code></div>')

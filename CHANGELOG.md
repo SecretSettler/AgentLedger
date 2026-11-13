@@ -31,6 +31,14 @@
   traces), the footer shows each trace's citation name and how often it is cited, and Ask is told which lines the
   module cites and the reviewer points at, and answers in the same form. Sharing keeps a raw transcript's line
   numbers while trimming it, so citations still land on the same record. The demo report cites its run log.
+- **Trace-store batches.** Raw traces kept as TrajFS experiment batches in GitHub releases stay there:
+  `publish --trace-batch <release>` (or `agentledger trace batch add`) records the batch's runs and file lists,
+  checked against its checksums, and `trace:` citations resolve into it by run path and file path (ambiguous ones are
+  refused). `agentledger trace get <report> <ref>` downloads only that run with the reader's own GitHub access,
+  checks every part (batch checksums and GitHub's digest) and the restored file (the capture's SHA256 and size),
+  restores it with TrajFS (`--raw-root` reads an original copy) and keeps it in `.cache`, where the trace panel, `trace
+  show` and Ask read it; without it, the panel and Ask give the fetch command. Cited lines of a trace-store file never
+  go into a page, and `serve` now serves `.cache` to this machine only.
 - Redaction no longer takes a call (`n_tokens = schedule_for_x(`) for an assigned secret, and no longer counts a
   JSON-escaped decorator (`\n@pytest.fixture`) as an e-mail address.
 
