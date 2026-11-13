@@ -36,7 +36,7 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
      with `--trace-batch <release link>` (repeatable; `agentledger trace batch add <id> <link>` adds one to a version
      already published), which records the batch's runs and file lists, not the traces. Cite a file by the end of its
      run's original path and its path inside the run, as it appears on disk:
-     `[Lead diagnosis](trace:peer-tool-v7/runs/gpt-6.1-sol-r1/sessions/<id>/session.v3.jsonl#L2559)`. Publish checks
+     `[Lead diagnosis](trace:exp-a/runs/r1/sessions/<id>/session.v3.jsonl#L2559)`. Publish checks
      each one against the batch's file lists (a path that matches two runs must name more of the run's path).
    - mark modules a human should check: `## Results {#results status=needs-review}`;
    - images or data files: save them next to the draft and pass each with `--asset <path>`.

@@ -6,7 +6,7 @@ file's path, SHA256 and size), each run's TrajFS store split into ``<run>.trace.
 
 ``publish --trace-batch <release>`` (or ``agentledger trace batch add``) records a batch on a version: its runs and
 their file lists, downloaded and checked against the release's checksums, never the raw traces.  A citation such as
-``trace:runs/gpt-6.1-sol-r1/sessions/x/session.v3.jsonl#L2559`` then resolves to one file of one run, and
+``trace:runs/r1/sessions/x/session.v3.jsonl#L2559`` then resolves to one file of one run, and
 ``agentledger trace get`` downloads only that run with the reader's own GitHub access, checks every byte, restores it
 with TrajFS and keeps the file under the store's ``.cache`` (never committed, and served only to this machine).
 """

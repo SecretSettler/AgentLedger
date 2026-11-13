@@ -267,7 +267,7 @@ Raw traces too large or too private for the store can stay in a **trace store**:
 as GitHub releases (one release per batch: `batch.json`, a `capture.json` per run with every file's SHA256, the
 run's TrajFS store in parts). `publish --trace-batch <release link>` records the batch's runs and file lists on the
 version, never the traces, and a citation names a file by its run's path and its path in the run:
-`trace:peer-tool-v7/runs/r1/sessions/<id>/session.v3.jsonl#L2559`. Clicking it shows the batch, run, file and
+`trace:exp-a/runs/r1/sessions/<id>/session.v3.jsonl#L2559`. Clicking it shows the batch, run, file and
 SHA256; `agentledger trace get <report> '<ref>'` downloads only that run with the reader's own GitHub access, checks
 every asset and the file against the capture, restores it with TrajFS (`traj`, or `--raw-root` with an original
 copy) and keeps it in the store's `.cache`, where the page, `trace show` and Ask read it. The cited lines of a
