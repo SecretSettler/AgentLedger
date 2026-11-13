@@ -9,7 +9,10 @@
   const V = D.version.n;
   const comments = new AL.Comments(D.store.key, D.report.id);
   const sync = new AL.Sync(D.store);
-  const ui = { panel: false, filter: 'open', scope: 'all', focus: null, compose: null, kind: 'question', anchors: new Map(), active: 0, asking: new Map() };
+  const ui = { panel: false, filter: 'open', scope: 'all', focus: null, compose: null, kind: 'question', anchors: new Map(), active: 0, asking: new Map(),
+    drafts: new Map(),     // thread id -> unsent follow-up text, so a re-render never loses what is being typed
+    followFocus: null,     // thread whose follow-up box gets the cursor back once the agent has answered
+    git: null, syncing: false };  // the store's git state (owner only) and a Sync in flight
   let reviewer = AL.storage.get('agentledger:name', '');
 
   const moduleById = (id) => modules.find((s) => s.dataset.module === id);
@@ -389,6 +392,18 @@
       b.disabled = !dirty;
       syncBar.append(b);
     }
+    if (sync.mode === 'server' && sync.canSync && ui.git && ui.git.repo) {
+      // One press: save, pull what others pushed, commit, push, so everyone with the store sees the review.
+      const g = ui.git;
+      const pending = dirty || g.changed || g.ahead;
+      const b = btn('sync', ui.syncing ? 'Syncing…' : 'Sync', syncNow, pending ? '.is-small.is-primary' : '.is-small',
+        g.remote ? `Save, pull others' changes, commit and push to ${g.remote}` : 'Save and commit the store (it has no remote)');
+      b.disabled = ui.syncing;
+      syncBar.append(h('div.al-gitrow', null,
+        pending ? h('span.al-pill.is-local', null, g.remote ? 'not pushed' : 'not committed') : h('span.al-pill.is-resolved', null, g.remote ? 'pushed' : 'committed'),
+        g.remote ? h('span.al-gitwhere', { title: g.remote }, 'to ', h('code', null, g.remote))
+          : h('span.al-gitwhere', null, 'git, on this machine (no remote)'), b));
+    }
 
     tabsBox.replaceChildren(
       ...[['open', 'Open', c.open], ['closed', 'Resolved', c.closed], ['all', 'All', c.all]].map(([k, label, n]) =>
@@ -403,10 +418,17 @@
 
     renderComposer();
     const list = listedThreads();
+    const act = document.activeElement;  // a follow-up being typed keeps its cursor through the re-render
+    const typingIn = act && act.classList.contains('al-followup-input') && threadsBox.contains(act)
+      ? { cid: act.dataset.cid, start: act.selectionStart, end: act.selectionEnd } : null;
     threadsBox.replaceChildren(...(list.length ? list.map(threadEl) : [h('div.al-empty', null,
       ui.filter === 'open' ? 'No open threads. Select any text in the report and press ' : 'Nothing here yet. Select text and press ',
       h('strong', null, 'Comment'), ', or use the ', AL.iconEl('comment'), ' button on a module.')]));
     if (ui.focus) { const el = threadsBox.querySelector(`[data-cid="${CSS.escape(ui.focus)}"]`); if (el) el.classList.add('is-focus'); }
+    if (typingIn) {
+      const ta = threadsBox.querySelector(`.al-followup-input[data-cid="${CSS.escape(typingIn.cid)}"]`);
+      if (ta) { ta.focus({ preventScroll: true }); ta.setSelectionRange(typingIn.start, typingIn.end); }
+    }
 
   }
 
@@ -426,6 +448,7 @@
     const a = ui.anchors.get(r.id) || {};
     const mod = modInfo.get(a.module || r.module);
     const replyBox = h('div.al-replybox', { hidden: true });
+    const follow = followupEl(t);
     const el = h('div.al-thread' + (r.status !== 'open' ? '.is-closed' : ''), { dataset: { cid: r.id } },
       h('div.al-thread-top', null,
         h('span.al-pill.is-' + r.status, null, r.status === 'wontfix' ? "won't fix" : r.status),
@@ -437,10 +460,11 @@
       r.quote ? h('blockquote.al-quote', { title: 'Show in report', onClick: () => go(r.id) }, r.quote) : null,
       msgEl(r, false), ...t.replies.map((x) => msgEl(x, true)),
       askingEl(r.id),
+      follow,
       h('div.al-thread-actions', null,
         btn('go', 'go', () => go(r.id), '.is-small', 'Scroll to the commented text'),
-        btn('reply', 'reply', () => openReply(replyBox, r), '.is-small'),
-        ui.asking.has(r.id) || !sync.askBackend ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
+        follow ? null : btn('reply', 'reply', () => openReply(replyBox, r), '.is-small'),
+        follow || ui.asking.has(r.id) || !sync.askBackend ? null : btn('spark', 'ask', () => askAgent(r.id), '.is-small', `Have ${askName()} answer this thread`),
         r.status === 'open'
           ? btn('check', 'resolve', () => setStatus(r, 'resolved'), '.is-small')
           : btn('reopen', 'reopen', () => setStatus(r, 'open'), '.is-small'),
@@ -459,15 +483,57 @@
     return true;
   }
 
+  function postReply(root, text) {
+    const ts = AL.nowIso();
+    comments.put({ id: AL.newId(), reply_to: root.id, report: root.report, version: root.version, module: root.module,
+      body: text, author: reviewer, role: 'human', status: '', created: ts, updated: ts });
+    ui.focus = root.id;
+  }
+
+  // Once the agent has answered in a thread, the thread reads as a conversation: a box under the last answer
+  // takes the next question (Enter asks, Shift+Enter breaks the line); "Reply only" saves without asking.
+  function followupEl(t) {
+    const r = t.root;
+    if (!sync.askBackend || r.status !== 'open' || ui.asking.has(r.id) || !t.replies.some((x) => x.role === 'agent')) return null;
+    const last = t.replies[t.replies.length - 1];
+    const pending = last.role !== 'agent';  // a reply the agent has not answered yet: Ask with an empty box answers it
+    const ta = h('textarea.al-textarea.al-followup-input', { rows: 1, dataset: { cid: r.id }, 'aria-label': 'Follow-up question',
+      placeholder: pending ? `Press Ask to have ${askName()} answer your reply, or add to it…` : `Ask ${askName()} a follow-up…` });
+    ta.value = ui.drafts.get(r.id) || '';
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(ta.scrollHeight + 2, 220)}px`; };
+    const take = () => {  // the typed text, posted as a reply; null when nothing should be sent
+      const text = ta.value.trim();
+      if (!text || needName()) return null;
+      ui.drafts.delete(r.id);
+      postReply(r, text);
+      return text;
+    };
+    const ask = () => {
+      if (!ta.value.trim() && !pending) return ta.focus();
+      if (ta.value.trim() && !take()) return;
+      ui.followFocus = r.id;
+      askAgent(r.id);
+    };
+    const replyOnly = () => { if (!ta.value.trim()) return ta.focus(); take(); };
+    ta.addEventListener('input', () => { if (ta.value) ui.drafts.set(r.id, ta.value); else ui.drafts.delete(r.id); grow(); });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); ask(); }  // 229: IME still composing
+      else if (e.key === 'Escape') ta.blur();
+    });
+    requestAnimationFrame(grow);
+    return h('div.al-followup', null, ta,
+      h('div.al-composer-row', null,
+        h('span.al-muted', { title: 'Enter asks; Shift+Enter starts a new line' }, '↵ ask · ⇧↵ new line'),
+        btn('reply', 'Reply only', replyOnly, '.is-small.is-ghost', 'Save your reply without asking'),
+        btn('spark', 'Ask', ask, '.is-small.is-primary', `Send and have ${askName()} answer`)));
+  }
+
   function openReply(box, root) {
     if (!box.hidden) { box.hidden = true; return; }
     const ta = h('textarea.al-textarea', { placeholder: 'Reply… (Ctrl/⌘+Enter to send)' });
     const send = () => {
       if (needName() || !ta.value.trim()) return false;
-      const ts = AL.nowIso();
-      comments.put({ id: AL.newId(), reply_to: root.id, report: root.report, version: root.version, module: root.module,
-        body: ta.value.trim(), author: reviewer, role: 'human', status: '', created: ts, updated: ts });
-      ui.focus = root.id;
+      postReply(root, ta.value.trim());
       return true;
     };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send(); if (e.key === 'Escape') box.hidden = true; });
@@ -552,6 +618,7 @@
         ui.reveal = threadId;
         if (st.reply) comments.addRemote([st.reply]);
         AL.toast(`${askName()} answered`);
+        refreshGit();
         return;
       }
       if (st.status === 'error') {
@@ -625,7 +692,8 @@
       composerBox.dataset.for = '';
       comments.put(row);
       if (asking) return askAgent(row.id);
-      AL.toast(sync.mode === 'none' ? 'Comment kept in this browser — export the CSV when done' : 'Comment added — save when ready');
+      AL.toast(sync.mode === 'none' ? 'Comment kept in this browser — export the CSV when done'
+        : sync.canSync ? 'Comment added — Save keeps it in the store, Sync also pushes it for others' : 'Comment added — save when ready');
     };
     const cancel = () => { ui.compose = null; composerBox.dataset.for = ''; unwrapMarks('mark.al-hl.is-draft'); renderComposer(); };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save(); if (e.key === 'Escape') { e.stopPropagation(); cancel(); } });
@@ -678,9 +746,48 @@
       const saved = await sync.save(rows, (r) => { const v = versionOf(r.version); return v && v.comments_path; });
       comments.markSynced(rows);
       comments.addRemote(saved.filter((r) => r.report === D.report.id), { prune: sync.mode === 'server' });
-      AL.toast(`Saved ${rows.length} change${rows.length === 1 ? '' : 's'}`);
+      AL.toast(`Saved ${rows.length} change${rows.length === 1 ? '' : 's'}` + (sync.canSync ? ' · Sync shares them' : ''));
+      refreshGit();
     } catch (e) {
       if (e.message !== 'cancelled') AL.toast(`Save failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function refreshGit() {
+    if (!sync.canSync) return;
+    ui.git = await sync.gitStatus();
+    renderPanel();
+  }
+  async function syncNow() {
+    if (ui.syncing) return;
+    const rows = comments.dirty();
+    ui.syncing = true;
+    renderPanel();
+    try {
+      const r = await sync.syncStore(rows, reviewer, D.report.id);
+      if (Array.isArray(r.rows)) {  // the server saved them, whatever git did next
+        comments.markSynced(rows);
+        comments.addRemote(r.rows.filter((x) => x.report === D.report.id), { prune: true });
+      }
+      if (!r.ok) {
+        AL.modal(`Sync stopped at ${r.stage || 'git'}`, h('div', null,
+          h('p', null, r.error + (rows.length ? '. Your comments are saved in the store.' : '.')),
+          r.output ? h('pre.al-pre', null, r.output) : null,
+          h('p', null, 'Fix it in the store folder, or run ', h('code', null, 'agentledger sync'), ' in a terminal to see more.')), []);
+      } else {
+        const to = r.remote ? ` to ${r.remote}` : '';
+        const what = r.pushed ? (r.commit ? `Pushed ${r.commit}${to}` : `Pushed${to}`)
+          : r.commit ? `Committed ${r.commit}${r.remote ? '' : ' (no remote to push to)'}`
+            : r.remote ? `Already in sync with ${r.remote}` : 'Nothing to commit';
+        const pulled = r.pulled ? ` · got ${r.pulled} commit${r.pulled === 1 ? '' : 's'} from others: reload for new versions` : '';
+        AL.toast(what + pulled);
+        if (r.pulled) await refreshFromFiles();
+      }
+    } catch (e) {
+      AL.toast(`Sync failed: ${e.message}`, 'error');
+    } finally {
+      ui.syncing = false;
+      await refreshGit();
     }
   }
 
@@ -1060,7 +1167,17 @@
       if (ui.reveal && ui.panel) {
         const el = threadsBox.querySelector(`.al-thread[data-cid="${CSS.escape(ui.reveal)}"]`);
         if (el) el.scrollIntoView({ block: 'nearest' });
+        const follow = el && el.querySelector('.al-followup');
+        if (follow) follow.scrollIntoView({ block: 'nearest' });  // a long thread: keep the newest answer and the next-question box in view
         ui.reveal = null;
+      }
+      // The agent answered a question asked from a follow-up box: put the cursor back there for the next one,
+      // unless the reviewer has moved on to something else meanwhile.
+      if (ui.followFocus && !ui.asking.has(ui.followFocus)) {
+        const ta = threadsBox.querySelector(`.al-followup-input[data-cid="${CSS.escape(ui.followFocus)}"]`);
+        const idle = !document.activeElement || document.activeElement === document.body;
+        if (ta && idle && ui.panel) ta.focus({ preventScroll: true });
+        ui.followFocus = null;
       }
       const perModule = new Map();
       for (const { root } of AL.threads(reportRows())) {
@@ -1138,7 +1255,7 @@
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(relayout);
   window.addEventListener('load', relayout);
   setTimeout(handleHash, 60);
-  sync.detect().then(() => renderPanel());
+  sync.detect().then(() => { renderPanel(); refreshGit(); });
   refreshFromFiles();
   window.AgentLedger = { data: D, comments, sync, openPanel, openMap };
 })();

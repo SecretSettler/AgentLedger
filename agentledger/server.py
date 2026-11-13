@@ -8,6 +8,10 @@ and review there, and the agent sees comments the moment they are saved.
 With an ask backend (``--ask``), pages can also send a review thread to the local
 agent CLI (``POST /__agentledger/ask``) and poll for its answer.
 
+The Sync button (``POST /__agentledger/sync``) saves, pulls, commits and pushes the
+store, as ``agentledger sync`` does, so others see the review.  Like Ask, it is only
+served to the machine itself: it acts with the owner's git identity and credentials.
+
 Only same-origin requests carrying ``X-AgentLedger: 1`` from an allowed Host are
 accepted, which blocks cross-site form posts and DNS-rebinding.
 """
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import socket
 import threading
 from functools import partial
@@ -24,6 +29,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from . import __version__
+from . import gitsync, redact
 from .ask import AskService, Backend
 from .build import build
 from .store import LedgerError, Store
@@ -76,9 +82,13 @@ class LedgerHandler(SimpleHTTPRequestHandler):
             return False
         return ip.is_loopback or bool(getattr(ip, "ipv4_mapped", None) and ip.ipv4_mapped.is_loopback)
 
+    def _owner(self) -> bool:
+        """This machine (or an SSH tunnel to it), addressed as localhost: the only one that may act as the owner."""
+        return self._local_client() and self._host_name() in LOOPBACK_NAMES
+
     def _ask(self) -> Optional[AskService]:
         """Ask runs the owner's agent: only for this machine (or an SSH tunnel to it), addressed as localhost."""
-        if not self.ask or not self._local_client() or self._host_name() not in LOOPBACK_NAMES:
+        if not self.ask or not self._owner():
             return None
         return self.ask
 
@@ -157,7 +167,13 @@ class LedgerHandler(SimpleHTTPRequestHandler):
             ask = self._ask()
             return self._json(200, {"ok": True, "agentledger": __version__, "store": self.store.name,
                                     "ask": ask.name if ask else None, "shared": self.share,
-                                    "local": self._local_client()})
+                                    "local": self._local_client(), "sync": self._owner()})
+        if path == "/__agentledger/git":
+            if not self._guard():
+                return None
+            if not self._owner():
+                return self._json(403, {"ok": False, "error": "only the machine running agentledger can sync"})
+            return self._json(200, {"ok": True, **gitsync.status(self.store.root)})
         if path.startswith("/__agentledger/ask/"):
             if not self._guard():
                 return None
@@ -167,16 +183,21 @@ class LedgerHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/__agentledger/comments", "/__agentledger/ask"):
+        if path not in ("/__agentledger/comments", "/__agentledger/ask", "/__agentledger/sync"):
             return self._json(404, {"ok": False, "error": "not found"})
         if not self._guard():
             return None
+        if path == "/__agentledger/sync" and not self._owner():
+            return self._json(403, {"ok": False, "error": "only the machine running agentledger can sync "
+                                                          "(it commits and pushes as its owner); shared viewers can comment"})
         if path == "/__agentledger/ask" and self.ask and not self._ask():
             return self._json(403, {"ok": False, "error": "Ask only works on the machine running agentledger (open it as localhost); shared viewers can comment"})
         payload = self._payload()
         if payload is None:
             return None
         rows = payload.get("rows", [])
+        if path == "/__agentledger/sync":
+            return self._sync(rows, payload)
         try:
             changed, merged = self._save(rows)
             if path == "/__agentledger/comments":
@@ -192,6 +213,26 @@ class LedgerHandler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": True, "job": job.id, "backend": job.backend, "rows": merged})
         except LedgerError as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
+
+    def _sync(self, rows: list[dict], payload: dict):
+        """Save what the page has not saved yet, then pull, commit and push the store."""
+        author = re.sub(r"\s+", " ", str(payload.get("author") or "")).strip()[:60] or None
+        report = str(payload.get("report") or "")
+        try:
+            with self.lock:
+                self.store.invalidate()
+                if rows:
+                    self.store.save_rows(rows)
+                result = gitsync.sync(self.store, author=author, prompt=False)
+                self.store.invalidate()
+                merged = [r for r in self.store.comments() if r["report"] == report] if report else []
+        except LedgerError as exc:
+            return self._json(400, {"ok": False, "error": str(exc)})
+        if result.get("output"):  # git's own words, minus any credential in a remote URL or token it echoed
+            result["output"] = redact.Scrubber({})(result["output"])
+        if not self.quiet:
+            self.log_message("sync: %s", result.get("committed") or result.get("error") or "nothing to commit")
+        return self._json(200 if result["ok"] else 409, {**result, "rows": merged})
 
 
 def serve(store: Store, host: str = "127.0.0.1", port: int = 8765, extra_hosts: tuple[str, ...] = (), quiet: bool = False,

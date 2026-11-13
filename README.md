@@ -55,7 +55,9 @@ agentledger open        # http://localhost:8765, comment on any line, Ask about 
 ```
 
 When you've commented, tell the agent *"handle the review comments on harness-vs-paper"*. It answers each thread,
-publishes v2 with the fixes, and marks what it resolved.
+publishes v2 with the fixes, and marks what it resolved. To bring someone in, tell it *"share harness-vs-paper with
+Alice"*: it asks who Alice is if it must, then gives a teammate the steps to join the store (Sync in the page sends
+and fetches comments), or packs the one report for someone outside it with credentials removed.
 
 Want to look around first? `agentledger demo` builds a sample store and opens it.
 
@@ -78,7 +80,7 @@ Paste this into Claude Code or Codex:
 ```
 
 On Claude Code 2.1.275 or later, one step does both: `/plugin install agentledger --marketplace SecretSettler/AgentLedger`.
-The plugin adds the skill plus `/agentledger:report`, `/agentledger:review` and `/agentledger:open`; on first use the
+The plugin adds the skill plus `/agentledger:report`, `/agentledger:review`, `/agentledger:share` and `/agentledger:open`; on first use the
 skill offers to install the CLI.
 
 ### 3. Codex
@@ -162,8 +164,15 @@ flags anything out of place:
   </tr>
 </table>
 
+- **Sync:** the panel's **Sync** button saves your comments, pulls what others pushed, commits (`review: <report> vN
+  by <you>`) and pushes the store, so everyone who can read it sees the review on GitHub or after their own Sync.
+  It is the same as `agentledger sync`, and only the machine running `agentledger serve` gets it: it commits and
+  pushes as you. A push that needs a password fails with git's message instead of waiting; run `agentledger sync`
+  once in a terminal to set up credentials.
 - **Comment / Ask:** select text, or use the icon on a module heading. Threads have go, reply, **Reply & ask**, resolve,
-  edit and delete.
+  edit and delete. Once the agent has answered, the thread is a conversation: type the next question in the box under
+  the answer and press <kbd>Enter</kbd> (<kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line, **Reply only** to save
+  without asking).
 - **Navigate without scrolling:** the rail is the report as a vertical timeline; the round stick at the bottom right
   is a joystick (drag up or down to scroll, click to open the pad); the version chain opens any version at the same module.
 - **Shortcuts:** <kbd>j</kbd>/<kbd>k</kbd> modules, <kbd>[</kbd>/<kbd>]</kbd> versions, <kbd>c</kbd> comment,
@@ -211,6 +220,8 @@ The skill tells the agent all of this; it's here for when you write one yourself
   the temp directory; every other tool stays off. When the sandbox cannot start, cannot be verified or would be
   widened, Ask only reads, and confidential files stay unreadable. `serve --ask-read-only`, `ask --read-only` or
   `AGENTLEDGER_ASK_SANDBOX=off` force read-only mode.
+- **Follow-ups.** Ask again in the same thread as often as you like. Every question sends the whole thread, earlier
+  answers included, and continues the version's review session, so the agent keeps the context of the conversation.
 - Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
 - Each version's review session is named `AgentLedger: <report> v<N>` and shows up in `claude --resume` and the IDE's
   session history, so you can open the conversation behind the answers. Questions on one version run one at a time.
@@ -225,24 +236,36 @@ The skill tells the agent all of this; it's here for when you write one yourself
 agentledger share repo/topic                     # → repo-topic.agentledger.zip: every version, sub-reports, traces, threads
 # they run, on their machine:
 agentledger open repo-topic.agentledger.zip      # unpacks to ~/.cache/agentledger/shared/…, opens it; Comment and Ask work
-agentledger link repo/topic ~/code/repo          # optional: let their agent read their checkout of the code too
+agentledger link repo/topic ~/code/repo          # to reproduce: their checkout of the code, at the commit open prints
 agentledger --store <printed path> comments export repo/topic -o feedback.csv   # or Export CSV in the page
 # back on your machine:
 agentledger comments import feedback.csv         # their questions and their agent's answers join your threads
 ```
 
 The file holds only that report: not the rest of your store, your local cache or your GitHub settings
-(`--no-traces` and `--no-comments` leave those out too). Traces are agent transcripts, with your home directory shown
-as `~`, so send them only to people you trust. When you share a newer version, they open the new file and keep their
-own comments. On their side every page is sanitised, and their agent works in the unpacked folder: it reads, and runs
-programs only inside its sandbox (see [Asking](#asking)).
+(`--no-traces` and `--no-comments` leave those out too). When you share a newer version, they open the new file and
+keep their own comments. On their side every page is sanitised, and their agent works in the unpacked folder: it
+reads, and runs programs only inside its sandbox (see [Asking](#asking)).
+
+**No credentials travel.** Before zipping, `share` passes every file (report, data, traces, threads) through the same
+redaction as `trace prepare`: the values of secrets known on your machine (`.env` files near the store, the checkouts
+and sessions behind the report, credential-named environment variables) and common key formats (API keys, GitHub and
+cloud tokens, private keys, JWTs, passwords in URLs, `api_key=…` assignments) become `[REDACTED:<name>]`, your home
+directory becomes `~`, and a raw Claude Code or Codex transcript is cut down to the conversation. Then the whole
+bundle, built pages included, is scanned again and nothing is written if anything is left; a binary file that holds a
+credential stops the share. Only the bundle changes, never your store, and `share` lists what it redacted, per file.
+Traces still show the work itself (commands, file contents the agent read), so send them to people you trust.
+
+**Reproducing it.** `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
+and `link` commands; after `link`, their agent reads that checkout and can re-run the analysis there, in its
+sandbox. Publish from inside the repository the report is about, so the commit is recorded.
 
 **Everything else:**
 
 - **Same network:** `agentledger serve --share` lets teammates read and comment at `http://<your-ip>:8765`.
 - **Remote machine:** `ssh -L 8765:localhost:8765 <host>`, then open `http://localhost:8765` (Ask works through the tunnel).
-- **Through GitHub:** teammates clone the private store and run `agentledger open`; their comments come back with
-  `agentledger sync`. Pages opened from disk can also **Save to GitHub** with a fine-grained token (Contents: read and
+- **Through GitHub:** teammates clone the private store and run `agentledger open`; everyone presses **Sync** in the
+  page (or runs `agentledger sync`) to send their comments and get the others'. Pages opened from disk can also **Save to GitHub** with a fine-grained token (Contents: read and
   write), or **Export CSV** for `agentledger comments import`.
 
 ### Hosted shared comments
@@ -264,8 +287,9 @@ them return to the page; unrelated private threads stay private. Agents review t
   credentials unreadable; read-only where no sandbox is available). It is only served to requests from the machine
   itself; `--share` exposes reading and commenting, never Ask. Shared mode accepts IP addresses and this
   machine's names only, which blocks DNS rebinding.
-- Traces are shared with everyone who can read the store, and with whoever you `share` a report to. `--trace auto`
-  shares a reviewed, redacted copy of the session. `--trace <path>` attaches the file as it is: it may hold secrets
+- Traces are shared with everyone who can read the store, and with whoever you `share` a report to (`share`
+  redacts credentials from everything it packs, see [Sharing](#sharing)). `--trace auto` shares a reviewed, redacted
+  copy of the session. `--trace <path>` attaches the file as it is: it may hold secrets
   or personal data (publish warns when it spots a credential, and `agentledger trace check <file>` looks for them),
   so the choice is yours. Once a store is pushed, deleting a trace leaves it in the git history: rotate any secret
   that got in.

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- **Follow-up questions in the thread.** Once the agent has answered, a box under the answer takes the next
+  question: Enter asks (Shift+Enter for a new line, IME composition is left alone), **Reply only** saves without
+  asking. The text being typed survives the panel refreshing, and the cursor returns to the box when the answer
+  arrives.
+- **No credentials in a shared report.** `agentledger share` redacts every file it packs (report, data, traces,
+  threads) as `trace prepare` does: secrets known on this machine and common credential formats become
+  `[REDACTED:<name>]`, the home directory `~`, and a raw Claude Code or Codex transcript is cut down to the
+  conversation. The built bundle is scanned again and not written if anything is left (a binary file holding a
+  credential stops the share). Your store is unchanged; `share` lists what it redacted, per file.
+- **Reproduce a shared report.** `agentledger open` prints the repository and commit the report describes with the
+  `git clone`, `checkout` and `link` commands; `agentledger link` says whether the checkout is at that commit.
+- **Sync from the page.** A **Sync** button in the review panel saves, pulls, commits (`review: <report> vN by
+  <name>`) and pushes the store, as `agentledger sync` does, so others see the review; it shows whether the store
+  has changes not pushed yet. Only the machine running `agentledger serve` gets it (shared viewers do not), and git
+  never prompts from it: a push that needs credentials fails with git's message. `agentledger sync` without `-m`
+  now names the reports whose threads changed.
+- **The skill picks how to share by who it is for:** a teammate gets access to the store (granted by the user, never
+  by the agent) and syncs; someone outside it gets one report as a file, written outside the working repository,
+  with internal threads left out on request; someone on the network gets `serve --share`. New `/agentledger:share`
+  command; `agentledger` alone now shows the store's remote and what is waiting to be pushed.
+- Redaction no longer takes a call (`n_tokens = schedule_for_x(`) for an assigned secret, and no longer counts a
+  JSON-escaped decorator (`\n@pytest.fixture`) as an e-mail address.
+
 ## 0.4.0
 
 - **Link the session, share a reviewed copy.** `publish --link-session auto|PATH|ID` is required: it records which

@@ -428,6 +428,7 @@ class TraceLinkTests(unittest.TestCase):
         scrub = Scrubber(secrets)
         cases = {
             "secrets = known_secrets(roots)": "secrets = known_secrets(roots)",               # code, not a secret
+            "data, total_num_tokens = combined_1f1b_schedule_for_x2(": "data, total_num_tokens = combined_1f1b_schedule_for_x2(",
             '"input_tokens": 123456789012': '"input_tokens": 123456789012',                 # a count
             "listen 127.0.0.1 in Asia/Shanghai": "listen 127.0.0.1 in Asia/Shanghai",       # plain settings
             "db hunter2hunter2": "db [REDACTED:DB_PASSWORD]",
@@ -442,6 +443,8 @@ class TraceLinkTests(unittest.TestCase):
         self.assertEqual(scrub(once), once)                                                   # idempotent
         scrub("mail ada@example.org")
         self.assertEqual(scrub.hints["e-mail addresses"], 1)                                # flagged, not redacted
+        scrub('"code": "import pytest\\n@pytest.fixture\\ndef gpu():"')                         # a decorator, escaped
+        self.assertEqual(scrub.hints["e-mail addresses"], 1)
 
     def test_codex_sessions_keep_the_conversation_only(self):
         from agentledger.redact import sanitize_session
@@ -1554,6 +1557,116 @@ class ShareTests(unittest.TestCase):
         page = (reader.root / "projects/demo/benchmark/v001/index.html").read_text()
         self.assertNotIn("alert(1)", page)
 
+    DOTENV = "s3cr3t-value-from-dotenv-XYZ"
+    ENV_SECRET = "envtoken-0123456789abcdef"
+    GITHUB = "ghp_" + "c" * 36
+    ANTHROPIC = "sk-ant-api03-" + "B" * 40
+    AWS = "AKIA" + "Q" * 16
+
+    def bundle_texts(self, bundle: Path) -> dict:
+        out = {}
+        with zipfile.ZipFile(bundle) as z:
+            for n in z.namelist():
+                data = z.read(n)
+                out[n] = (gzip.decompress(data) if n.endswith(".gz") else data).decode("utf-8", "replace")
+        return out
+
+    def test_bundle_carries_no_credentials(self):
+        """Secrets known on this machine and credential formats never leave in a bundle; the store keeps its files."""
+        work = self.tmp / "work"
+        work.mkdir()
+        (work / ".env").write_text(f"MY_API_KEY={self.DOTENV}\n")
+        home = os.environ["HOME"]
+        log = self.tmp / "run.log"
+        log.write_text(f"export MY_API_KEY={self.DOTENV}\ncurl -H 'Authorization: Bearer {self.ENV_SECRET}' ...\n"
+                       f"anthropic={self.ANTHROPIC}\nresult: 4721 us\n")
+        raw = self.tmp / f"{SID}.jsonl"   # a whole Claude Code transcript, attached as it is (as before 0.4)
+        raw.write_text("\n".join(json.dumps(x) for x in [
+            {"type": "session-owner", "accountUuid": "acct-123", "organizationUuid": "org-456", "sessionId": SID},
+            {"type": "user", "isMeta": True, "sessionId": SID, "message": {"role": "user", "content": "MEMORY INDEX TEXT"}},
+            {"type": "user", "sessionId": SID, "message": {"role": "user", "content": [
+                {"type": "text", "text": "measure it <system-reminder>REMINDER TEXT</system-reminder> please"}]}},
+            {"type": "assistant", "sessionId": SID, "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "PRIVATE REASONING"},
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": f"GH_TOKEN={self.GITHUB} gh api"}}]}},
+        ]) + "\n")
+        draft = self.tmp / "v2.md"
+        draft.write_text(f"# Benchmark\n\n## Results {{#results}}\n\nRan from {home}/proj with token {self.GITHUB}.\n")
+        with mock.patch.dict(os.environ, {"DEMO_TOKEN": self.ENV_SECRET}):
+            self.owner.publish("demo/benchmark", draft, traces=[log, raw])
+            self.owner.remember_local("demo/benchmark", 2, {"repo_path": str(work)})
+            self.owner.add_comment("demo/benchmark", f"my key was {self.AWS}", author="me")
+            code, out = run("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.bundle))
+        self.assertEqual(code, 0, out)
+        texts = self.bundle_texts(self.bundle)
+        everything = "\n".join(texts.values())
+        for gone in (self.DOTENV, self.ENV_SECRET, self.GITHUB, self.ANTHROPIC, self.AWS, "acct-123", "org-456",
+                     "MEMORY INDEX", "REMINDER TEXT", "PRIVATE REASONING", home):
+            self.assertNotIn(gone, everything, gone)
+        log_text = texts["projects/demo/benchmark/v002/traces/run.log.gz"]
+        for kept in ("[REDACTED:MY_API_KEY]", "[REDACTED:DEMO_TOKEN]", "[REDACTED:anthropic-key]", "result: 4721 us"):
+            self.assertIn(kept, log_text, kept)
+        self.assertIn("measure it", texts[f"projects/demo/benchmark/v002/traces/{SID}.jsonl.gz"])
+        self.assertIn("~/proj", texts["projects/demo/benchmark/v002/report.md"])
+        self.assertIn("credentials: redacted", out)
+        self.assertIn("1 raw agent transcript", out)
+        self.assertIn("projects/demo/benchmark/v002/traces/run.log.gz", out)
+        marker = json.loads(texts["agentledger-share.json"])
+        self.assertEqual(marker["redaction"]["sessions_trimmed"], 1)
+        self.assertIn("known secret MY_API_KEY", marker["redaction"]["redacted"])
+        # only the bundle changed: the store still holds what was published
+        stored = gzip.decompress((self.owner.root / "projects/demo/benchmark/v002/traces/run.log.gz").read_bytes()).decode()
+        self.assertIn(self.DOTENV, stored)
+        # and the reader still gets a working report
+        from agentledger import share
+        reader, _ = share.unpack(self.bundle, self.tmp / "reader")
+        self.assertEqual(len(reader.report("demo/benchmark").versions), 2)
+
+    def test_clean_bundle_says_so_and_keeps_bytes(self):
+        code, out = run("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.bundle))
+        self.assertEqual(code, 0, out)
+        self.assertIn("credentials: none found", out)
+        with zipfile.ZipFile(self.bundle) as z:
+            self.assertEqual(z.read("projects/demo/benchmark/v001/report.md"),
+                             (self.owner.root / "projects/demo/benchmark/v001/report.md").read_bytes())
+
+    def test_binary_file_with_a_credential_is_not_shared(self):
+        blob = self.tmp / "dump.bin"
+        blob.write_bytes(b"\x00\x01binary " + self.GITHUB.encode() + b"\x00")
+        self.owner.publish("demo/benchmark", DEMO / "benchmark-v2.md", assets=[blob])
+        code, out, err = run_err("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.bundle))
+        self.assertNotEqual(code, 0)
+        self.assertIn("dump.bin", err)
+        self.assertIn("github-token", err)
+        self.assertNotIn(self.GITHUB, out + err)
+        self.assertFalse(self.bundle.exists())
+
+    def test_reader_is_told_how_to_reproduce(self):
+        from agentledger import share
+        from agentledger.cli import reproduce_lines
+        repo = self.tmp / "proj"
+        repo.mkdir()
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True).stdout.strip()
+        git("init", "-q")
+        git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "one")
+        commit = git("rev-parse", "--short", "HEAD")
+        self.owner.publish("demo/benchmark", DEMO / "benchmark-v2.md", context={
+            "repo": "https://github.com/me/proj.git", "branch": "main", "commit": commit, "dirty": False,
+            "path": str(repo)})
+        share.pack(self.owner, "demo/benchmark", self.bundle)
+        reader, _ = share.unpack(self.bundle, self.tmp / "reader")
+        steps = "\n".join(reproduce_lines(reader, reader.report("demo/benchmark")))
+        self.assertIn(f"https://github.com/me/proj.git @ {commit}", steps)
+        self.assertIn(f"git clone https://github.com/me/proj.git proj && git -C proj checkout {commit}", steps)
+        self.assertIn("link demo/benchmark proj", steps)
+        self.assertNotIn(str(repo), steps)
+        code, out = run("--store", str(reader.root), "link", "demo/benchmark", str(repo))
+        self.assertEqual(code, 0, out)
+        self.assertIn("the commit the report describes", out)
+        git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "two")
+        code, out = run("--store", str(reader.root), "link", "demo/benchmark", str(repo))
+        self.assertIn(f"checkout {commit}", out)
+
     def test_link_points_ask_at_a_checkout(self):
         from agentledger.ask import build_prompt
         repo = self.tmp / "my-checkout"
@@ -1611,6 +1724,124 @@ class ServerTests(unittest.TestCase):
         self.assertIn("c_x", (self.store.root / "projects/p/r/v001/index.html").read_text())
         status, body = self.post([dict(row, report="p/nope")], {"X-AgentLedger": "1"})
         self.assertEqual(status, 400)
+
+
+class SyncButtonTests(unittest.TestCase):
+    """The page's Sync button: save, pull, commit and push the store, for the machine that runs it only."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.remote = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
+        root = init_store(self.tmp / "store", name="Srv")
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "owner@example.com")
+        self.git("config", "user.name", "owner")
+        self.store = Store(root)
+        self.store.publish("p/r", DEMO / "dna-primer.md")
+        build(self.store)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "init")
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("push", "-q", "-u", "origin", "main")
+        self.servers = []
+
+    def tearDown(self):
+        for httpd in self.servers:
+            httpd.shutdown()
+            httpd.server_close()
+        shutil.rmtree(self.tmp)
+
+    def git(self, *argv, cwd=None):
+        return subprocess.run(["git", "-C", str(cwd or self.tmp / "store"), *argv], capture_output=True, text=True).stdout
+
+    def start(self, **kw):
+        httpd = serve(self.store, port=0, quiet=True, **kw)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.servers.append(httpd)
+        return httpd.server_address[1]
+
+    def call(self, port, path, body=None, host=None):
+        headers = {"X-AgentLedger": "1", "Content-Type": "application/json", **({"Host": host} if host else {})}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers, method="POST" if body is not None else "GET",
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def row(self, cid="c_s1", body="please re-check the primer"):
+        return {"id": cid, "report": "p/r", "version": "1", "body": body, "author": "dan", "role": "human",
+                "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
+
+    def test_sync_saves_commits_and_pushes(self):
+        port = self.start()
+        status, ping = self.call(port, "/__agentledger/ping")
+        self.assertTrue(ping["sync"])
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()], "author": "dan", "report": "p/r"})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["pushed"])
+        self.assertEqual(body["committed"], "review: p/r v1 by dan")
+        self.assertIn("c_s1", {r["id"] for r in body["rows"]})
+        self.assertIn("review: p/r v1 by dan", self.git("--git-dir", str(self.remote), "log", "--oneline", "main", cwd=self.tmp))
+        status, st = self.call(port, "/__agentledger/git")
+        self.assertEqual((st["changed"], st["ahead"]), (0, 0))
+        status, again = self.call(port, "/__agentledger/sync", {"rows": [], "report": "p/r"})
+        self.assertTrue(again.get("up_to_date"))
+        self.assertIsNone(again["committed"])
+
+    def test_sync_pulls_what_others_pushed(self):
+        other = self.tmp / "teammate"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(other)], check=True)
+        mate = Store(other)
+        mate.save_rows([self.row("c_mate", "teammate's question")])
+        self.git("add", "-A", cwd=other)
+        self.git("-c", "user.email=m@example.com", "-c", "user.name=mate", "commit", "-q", "-m", "mate", cwd=other)
+        self.git("push", "-q", cwd=other)
+        port = self.start()
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()], "author": "dan", "report": "p/r"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["pulled"], 1)
+        self.assertTrue(body["pushed"])
+        self.assertTrue({"c_mate", "c_s1"} <= {r["id"] for r in body["rows"]})
+
+    def test_only_this_machine_can_sync(self):
+        port = self.start(share=True)
+        status, ping = self.call(port, "/__agentledger/ping", host="192.168.7.7")   # a teammate on the LAN
+        self.assertFalse(ping["sync"])
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()]}, host="192.168.7.7")
+        self.assertEqual(status, 403)
+        self.assertEqual(self.call(port, "/__agentledger/git", host="192.168.7.7")[0], 403)
+        self.assertEqual(self.git("rev-list", "--count", "HEAD").strip(), "1")
+
+    def test_failed_push_keeps_the_comments_and_says_why(self):
+        self.git("remote", "set-url", "origin", "https://owner:supersecret123@127.0.0.1:9/nowhere.git")
+        self.git("branch", "--unset-upstream")
+        port = self.start()
+        status, body = self.call(port, "/__agentledger/sync", {"rows": [self.row()], "author": "dan", "report": "p/r"})
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["stage"], "push")
+        self.assertIn("c_s1", (self.store.root / "projects/p/r/v001/comments.csv").read_text())
+        self.assertEqual(body["committed"], "review: p/r v1 by dan")
+        self.assertNotIn("supersecret123", json.dumps(body))
+
+    def test_status_shows_the_remote_and_what_waits(self):
+        code, out = run("--store", str(self.store.root))
+        self.assertIn("remote.git (branch main): nothing waiting to push", out)
+        self.store.save_rows([self.row()])
+        code, out = run("--store", str(self.store.root))
+        self.assertIn("changed file(s), run agentledger sync", out)
+        self.git("remote", "remove", "origin")
+        self.assertIn("no remote yet", run("--store", str(self.store.root))[1])
+
+    def test_commit_message_names_the_reviewed_reports(self):
+        from agentledger.gitsync import remote_label, review_message
+        self.assertEqual(review_message(["projects/a/b/v002/comments.csv", "projects/a/b/v002/index.html"], "ann"),
+                         "review: a/b v2 by ann")
+        self.assertEqual(review_message(["projects/a/v001/report.md"]), "agentledger: update")
+        self.assertEqual(remote_label("git@github.com:me/ledger.git"), "me/ledger")
+        self.assertEqual(remote_label("https://tok@github.com/me/ledger"), "me/ledger")
 
 
 if __name__ == "__main__":

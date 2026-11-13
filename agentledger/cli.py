@@ -18,6 +18,7 @@ from typing import Optional
 from . import __version__
 from . import comments as cm
 from .build import build
+from .gitsync import git
 from . import sandbox
 from .ask import (CODEX_FLAGS, AskError, answer_thread, build_prompt, plan, repo_checkout, resolve_backend,
                   review_key, thread_of)
@@ -104,13 +105,6 @@ def cmd_init(args) -> int:
     print(f"initialised store at {root}")
     print("next: agentledger publish <project>/<report> report.md --link-session auto")
     return 0
-
-
-def git(cwd: Path, *argv: str) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(["git", "-C", str(cwd), *argv], capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return subprocess.CompletedProcess(["git", *argv], 1, "", str(exc))
 
 
 def git_context(cwd: Path, store: Store) -> dict | None:
@@ -300,44 +294,32 @@ def cmd_publish(args) -> int:
 
 def cmd_sync(args) -> int:
     """Pull the store, rebuild, commit everything, push."""
+    from .gitsync import sync
+
     store = open_store(args)
-    root = store.root
-    if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
-        rebuild(store)
+    r = sync(store, args.message, pull=not args.no_pull, push=not args.no_push)
+    if not r["repo"]:
+        print(f"built {r['rebuilt']} file{'s' if r['rebuilt'] != 1 else ''}", file=sys.stderr)
         print("store is not a git repository; rebuilt only")
         return 0
-    upstream = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").returncode == 0
-    has_origin = bool(git(root, "remote").stdout.split())
-    if upstream and not args.no_pull:
-        r = git(root, "pull", "--rebase", "--autostash")
-        if r.returncode != 0:
-            print(r.stdout + r.stderr, file=sys.stderr)
-            print("agentledger: pull failed; resolve it in the store (comments.csv conflicts: keep both sides' rows), then sync again",
-                  file=sys.stderr)
-            return 1
-        store.invalidate()
-    written = build(store)
-    git(root, "add", "-A")
-    if git(root, "diff", "--cached", "--quiet").returncode != 0:
-        msg = args.message or "agentledger: update"
-        r = git(root, "commit", "-m", msg)
-        if r.returncode != 0:
-            print(r.stdout + r.stderr, file=sys.stderr)
-            return 1
-        print(f"committed: {msg}")
-    else:
-        print("nothing to commit" + (f" (rebuilt {len(written)} files)" if written else ""))
-    if args.no_push or not has_origin:
-        return 0
-    ahead = git(root, "rev-list", "--count", "@{u}..HEAD") if upstream else None
-    if ahead is not None and ahead.returncode == 0 and ahead.stdout.strip() == "0":
-        print("up to date with the remote")
-        return 0
-    r = git(root, "push") if upstream else git(root, "push", "-u", "origin", "HEAD")
-    if r.returncode != 0:
-        print(r.stdout + r.stderr, file=sys.stderr)
+    if r.get("pulled"):
+        print(f"pulled {r['pulled']} commit{'s' if r['pulled'] != 1 else ''}")
+    if not r["ok"] and r.get("stage") == "pull":
+        print(r.get("output", ""), file=sys.stderr)
+        print(f"agentledger: {r['error']}", file=sys.stderr)
         return 1
-    print("pushed")
+    if r["committed"]:
+        print(f"committed: {r['committed']}")
+    elif r["ok"]:
+        print("nothing to commit" + (f" (rebuilt {r['rebuilt']} files)" if r["rebuilt"] else ""))
+    if not r["ok"]:
+        print(r.get("output", ""), file=sys.stderr)
+        print(f"agentledger: {r['error']}", file=sys.stderr)
+        return 1
+    if r.get("up_to_date"):
+        print("up to date with the remote")
+    elif r["pushed"]:
+        print("pushed")
     return 0
 
 
@@ -405,6 +387,18 @@ def cmd_status(args) -> int:
     print(f"  reports  {len(reports)} in {len(store.projects())} project(s), "
           f"{sum(len(r.versions) for r in reports)} version(s)")
     print(f"  threads  {sum(1 for t in threads if t['root']['status'] == 'open')} open, {len(waiting)} waiting on the agent")
+    from .gitsync import status as git_status
+    g = git_status(store.root)
+    if not g["repo"]:
+        print("  git      not a git repository: nobody else can sync with it (git init it and push it to a private remote)")
+    elif not g.get("remote"):
+        print(f"  git      no remote yet: others can't get it until it is pushed to a private repository "
+              f"(e.g. gh repo create <name> --private --source {shlex.quote(str(store.root))} --push)")
+    else:
+        pending = [f"{g['changed']} changed file(s)" if g["changed"] else "",
+                   f"{g['ahead']} commit(s) not pushed" if g.get("ahead") else ""]
+        pending = ", ".join(x for x in pending if x)
+        print(f"  git      {g['remote']} (branch {g['branch']}): " + (f"{pending}, run agentledger sync" if pending else "nothing waiting to push"))
     print("\n  agentledger open        review in the browser (comment, Ask)\n"
           "  agentledger tree        list reports\n"
           "  agentledger --help      everything else")
@@ -422,8 +416,26 @@ def cmd_share(args) -> int:
     print(f"  {info['versions']} version(s), {info['traces']} trace(s), {info['threads']} review thread(s)"
           + ("" if not args.no_traces else "; traces left out") + ("" if not args.no_comments else "; threads left out"))
     print("  the rest of your store, your local cache and GitHub settings are not included")
+    creds = info["redacted"]
+    if creds:
+        print(f"  credentials: redacted {sum(creds.values())} in {len([f for f, c in info['files'].items() if set(c) - {'home directory paths'}])}"
+              f" file(s): " + ", ".join(f"{k} ×{n}" for k, n in sorted(creds.items(), key=lambda kv: -kv[1])))
+        for f, c in info["files"].items():
+            kinds = {k: n for k, n in c.items() if k != "home directory paths"}
+            if kinds:
+                print(f"    {f}: " + ", ".join(f"{k} ×{n}" for k, n in kinds.items()))
+        print("    (in the bundle only; your store is unchanged)")
+    else:
+        print(f"  credentials: none found in {info['checked']} file(s) (secrets known on this machine and common key formats)")
+    if info["sessions_trimmed"]:
+        print(f"  {info['sessions_trimmed']} raw agent transcript(s) cut down to the conversation "
+              "(no system text, attached files, reasoning or account ids)")
+    if info["home_paths"]:
+        print(f"  {info['home_paths']} path(s) under your home directory shown as ~")
+    if info["emails"]:
+        print(f"  note: {info['emails']} e-mail address(es) left in (not credentials; check them if that matters)")
     if info["traces"]:
-        print("  traces are the agent transcripts behind the report (home directory shown as ~): share them only with people you trust")
+        print("  traces are the agent transcripts and logs behind the report: share them only with people you trust")
     print(f"\nThey run:  agentledger open {out.name}")
     print("Their comments come back as a CSV:  agentledger comments import <their-file>.csv")
     return 0
@@ -440,8 +452,39 @@ def cmd_link(args) -> int:
     ctx = (report.latest.meta.get("context") or {}) if report.latest else {}
     print(f"{report.id}: Ask now also reads {repo}  (kept in .cache, never committed)")
     if ctx.get("commit"):
-        print(f"  the report describes {ctx.get('repo', '')} @ {ctx['commit']}: check that commit out there for exact answers")
+        head = git(repo, "rev-parse", "HEAD")
+        head = head.stdout.strip() if head.returncode == 0 else ""
+        if head and head.startswith(ctx["commit"]):
+            print(f"  it is at {ctx['commit']}, the commit the report describes"
+                  + ("; the report was written with uncommitted changes on top" if ctx.get("dirty") else ""))
+        elif head:
+            print(f"  it is at {head[:12]}, but the report describes {ctx.get('repo', '')} @ {ctx['commit']}: "
+                  f"git -C {shlex.quote(str(repo))} checkout {ctx['commit']}  for exact answers")
+        else:
+            print(f"  the report describes {ctx.get('repo', '')} @ {ctx['commit']}: check that commit out there for exact answers")
     return 0
+
+
+def reproduce_lines(store: Store, report) -> list[str]:
+    """How a reader gets the code a shared report describes, so their agent can check and re-run it."""
+    ctx = (report.latest.meta.get("context") or {}) if report.latest else {}
+    if not ctx.get("commit"):
+        return ["  to reproduce: no repository was recorded for this report; work from the report and its traces"]
+    repo, commit = ctx.get("repo") or "", ctx["commit"]
+    remote = "/" in repo or ":" in repo
+    name = re.sub(r"\.git$", "", repo.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]) or "repo"
+    store_arg = shlex.quote(str(store.root))
+    lines = [f"  to reproduce: the report describes {repo} @ {commit}"
+             + (f" (branch {ctx['branch']})" if ctx.get("branch") else "")]
+    if remote:
+        lines.append(f"    git clone {shlex.quote(repo)} {name} && git -C {name} checkout {commit}")
+    else:
+        lines.append(f"    (no remote was recorded: ask the sender for the {name} repository, then check out {commit})")
+    lines += [f"    agentledger --store {store_arg} link {report.id} {name}",
+              "    then Ask can read that checkout and re-run the analysis there, in your agent's sandbox"]
+    if ctx.get("dirty"):
+        lines.append("    (it was written with uncommitted changes, so the commit alone may not match exactly)")
+    return lines
 
 
 def cmd_open(args) -> int:
@@ -452,6 +495,8 @@ def cmd_open(args) -> int:
 
         store, info = share.unpack(Path(target), Path(args.into) if args.into else None)
         print(f"opened {info['report']} shared from {info.get('from', 'another store')}  →  {store.root}")
+        for line in reproduce_lines(store, store.report(info["report"])):
+            print(line)
         print(f"  send your comments back:  agentledger --store {shlex.quote(str(store.root))} comments export "
               f"{info['report']} -o feedback.csv   (or Export CSV in the page)")
         args.store, args.report = str(store.root), info["report"]
@@ -932,7 +977,7 @@ def make_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_publish)
 
     s = sub.add_parser("sync", help="pull the store, rebuild, commit everything and push")
-    s.add_argument("-m", "--message", help="commit message (default: 'agentledger: update')")
+    s.add_argument("-m", "--message", help="commit message (default: the reports whose threads changed, else 'agentledger: update')")
     s.add_argument("--no-pull", action="store_true")
     s.add_argument("--no-push", action="store_true")
     s.set_defaults(func=cmd_sync)
