@@ -265,10 +265,12 @@ def resolve(report, v, name: str, version: Optional[int] = None):
         if found:
             best = max(i for i, *_ in found)
             top = {(b["tag"], run["id"], f[0]): (b, run, f) for i, b, run, f in found if i == best}
-            if len(top) > 1:
+            if len({(f[1], f[2]) for _, _, f in top.values()}) > 1:
                 where = "; ".join(f"{t} run {r}" for t, r, _ in list(top)[:4])
                 raise BatchError(f"{name} matches more than one run ({where}): give more of the run's path")
-            b, run, f = next(iter(top.values()))
+            # The same bytes in several runs (an audit keeps a copy of a session) are the same evidence: take the copy
+            # that is cheapest to download.
+            b, run, f = min(top.values(), key=lambda c: (sum(p.get("size", 0) for p in c[1]["parts"]), c[1]["id"]))
             return Hit(x, b, run, f[0], f[1], f[2])
     return None
 

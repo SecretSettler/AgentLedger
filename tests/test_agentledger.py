@@ -277,8 +277,10 @@ class TraceBatchTests(unittest.TestCase):
         self.env.start()
         self.store = Store(init_store(self.tmp / "store", name="T"))
         self.release = FakeRelease(self.tmp, "2026-11-11-exp-v1", {
-            "exp-r1-aaa": ("/data/exp/peer/runs/r1", {"sessions/s1/session.v3.jsonl": self.SESSION, "logs/job.log": "ok r1\n"}),
-            "exp-r2-bbb": ("/data/exp/peer/runs/r2", {"sessions/s2/session.v3.jsonl": "x\n", "logs/job.log": "ok r2\n"}),
+            "exp-r1-aaa": ("/data/exp/peer/runs/r1", {"sessions/s1/session.v3.jsonl": self.SESSION, "logs/job.log": "ok r1\n",
+                                                      "TASK.md": "the same task\n"}),
+            "exp-r2-bbb": ("/data/exp/peer/runs/r2", {"sessions/s2/session.v3.jsonl": "x\n", "logs/job.log": "ok r2\n",
+                                                      "TASK.md": "the same task\n"}),
         })
         self.gh = mock.patch.object(tracebatch, "GitHub", self.release.github())
         self.gh.start()
@@ -306,7 +308,7 @@ class TraceBatchTests(unittest.TestCase):
     def test_batch_citations_resolve_without_the_raw_trace(self):
         code, out = self.add()
         self.assertEqual(code, 0, out)
-        self.assertIn("2 runs, 4 files listed", out)
+        self.assertIn("2 runs, 6 files listed", out)
         self.assertEqual(self.release.downloads.count("exp-r1-aaa.trace.trajstore.tar.part0000"), 0)   # no raw trace
         refs, page = self.page_refs()
         e = refs["trace:runs/r1/sessions/s1/session.v3.jsonl#L3"]
@@ -314,7 +316,13 @@ class TraceBatchTests(unittest.TestCase):
         self.assertNotIn("lines", e)                                   # the trace's text never goes into the page
         self.assertIn("agentledger trace get p/r 'trace:runs/r1/sessions/s1/session.v3.jsonl#L3'", e["fetch"])
         self.assertEqual(refs["trace:runs/r2/logs/job.log#L1"]["batch"]["run"], "exp-r2-bbb")
-        self.assertIn("more than one run", refs["trace:logs/job.log#L1"]["error"])
+        self.assertIn("more than one run", refs["trace:logs/job.log#L1"]["error"])   # different bytes: say which
+        from agentledger import tracebatch as tb
+        self.store.invalidate()
+        report = self.store.report("p/r")
+        same = tb.resolve(report, report.latest, "TASK.md")                          # the same bytes in both runs
+        cost = lambda r: (sum(p["size"] for p in r["parts"]), r["id"])
+        self.assertEqual(same.run["id"], min(same.batch["runs"], key=cost)["id"])    # the cheapest download
         self.assertIn("trace-store batches", refs["trace:runs/r1/missing.txt#L1"]["error"])
         self.assertIn("Trace-store batches", page)
         self.assertNotIn("step 20", page)                              # a line of the trace the report does not quote
@@ -391,6 +399,27 @@ class TraceBatchTests(unittest.TestCase):
         self.assertNotIn("citation", err)
         code, out = run("--store", str(self.store.root), "trace", "batch", "list", "p/r")
         self.assertIn("v2  o/trace-store@2026-11-11-exp-v1  2 run(s)", out)
+
+    def test_a_shared_report_keeps_its_batches_but_no_raw_trace(self):
+        """The reader of a bundle gets the batch's file lists, fetches the run with their own access, and checks it."""
+        from agentledger import share
+        self.add()
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L3",
+            "--traj", str(self.traj))                                   # the author's own fetched copy must not travel
+        bundle = self.tmp / "r.agentledger.zip"
+        share.pack(self.store, "p/r", bundle)
+        with zipfile.ZipFile(bundle) as z:
+            names = z.namelist()
+            self.assertIn("projects/p/r/v001/trace-batches/2026-11-11-exp-v1.json", names)
+            self.assertFalse([n for n in names if ".cache" in n or ".part" in n])
+            index = json.loads(z.read("projects/p/r/v001/trace-batches/2026-11-11-exp-v1.json"))
+        mine = json.loads((self.store.root / "projects/p/r/v001/trace-batches/2026-11-11-exp-v1.json").read_text())
+        self.assertEqual(index["runs"], mine["runs"])                   # file lists and SHA256s arrive unchanged
+        reader, _ = share.unpack(bundle, self.tmp / "reader")
+        code, out, err = run_err("--store", str(reader.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "-C", "0", "--traj", str(self.traj))
+        self.assertEqual(code, 0, err)
+        self.assertIn('>3 │ {"n": 3, "text": "step 3"}', out)
 
     def test_shared_viewers_never_get_the_cache(self):
         self.add()
