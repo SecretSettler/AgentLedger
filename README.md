@@ -228,6 +228,16 @@ The skill tells the agent all of this; it's here for when you write one yourself
   (Claude Code lists no `claude -p` session by default; Ask records the entrypoint `agentledger-ask` instead.
   `AGENTLEDGER_ASK_ENTRYPOINT=sdk-cli` hides them again.)
 
+### Read with your own AI
+
+Use [agentledger-reader](skills/agentledger-reader) in Codex or Claude Code to investigate a shared report in your
+own session. Give it the report URL and your question. It pins the report version, locates cited private release
+batches and verifies each trace file it retrieves. It uses your own GitHub login and model account.
+
+A reader kit can include the public report and charts; private traces remain in their original releases. The helper
+downloads one selected run at a time, rather than copying the whole report store or experiment batch.
+See the skill for commands and TrajFS requirements.
+
 ### Sharing
 
 **One report, to someone who should ask their own AI about it:**
