@@ -433,7 +433,7 @@
   }
 
   function msgEl(m, isReply) {
-    const body = h('div.al-msg-body', { html: AL.mdLite(m.body) });
+    const body = h('div.al-msg-body', { html: linkTraceRefs(AL.mdLite(m.body)) });
     return h('div.al-msg' + (isReply ? '.is-reply' : '') + (m.role === 'agent' ? '.is-agent' : ''), { dataset: { mid: m.id } },
       h('div.al-msg-head', null,
         h('b', null, m.author || 'anonymous'),
@@ -789,6 +789,127 @@
       ui.syncing = false;
       await refreshGit();
     }
+  }
+
+  /* ========================================================== traces */
+  // A citation [label](trace:run.log#L12-L14) became a link to an excerpt kept in the page (D.traces.refs); the same
+  // reference typed in a comment or an answer is looked up among the page's trace files and loaded when served.
+  const TRACES = D.traces || { refs: {}, files: [] };
+  const TREF_TEXT = /trace:(?:v\d+\/)?[\w.\-\/]+(?:#L\d+(?:-L?\d+)?)?/g;
+  function parseRef(s) {
+    const m = /^(?:trace:)?(?:v(\d+)\/)?([^#\s]+?)(?:#L(\d+)(?:-L?(\d+))?)?$/.exec(String(s).trim());
+    if (!m) return null;
+    const a = m[3] ? +m[3] : null;
+    return { version: m[1] ? +m[1] : null, name: m[2], start: a, end: m[4] ? +m[4] : a };
+  }
+  const refText = (r) => 'trace:' + (r.version ? `v${r.version}/` : '') + r.name
+    + (r.start ? `#L${r.start}` + (r.end && r.end !== r.start ? `-L${r.end}` : '') : '');
+  const linesLabel = (r) => (!r.start ? 'whole file' : r.end === r.start ? `line ${r.start}` : `lines ${r.start}–${r.end}`);
+  function liveEntry(raw) {
+    const r = parseRef(raw);
+    if (!r) return null;
+    const ref = refText(r);
+    const known = Object.values(TRACES.refs).find((e) => e.ref === ref && e.lines);
+    if (known) return known;
+    const named = (f) => f.name === r.name || (!r.name.includes('/') && f.name.split('/').pop() === r.name);
+    const f = TRACES.files.filter((x) => (!r.version || x.version === r.version) && named(x)).sort((a, b) => b.version - a.version)[0];
+    if (!f) return { ref, name: r.name, start: r.start, end: r.end, error: `no trace named ${r.name} on this page` };
+    return { ref, name: f.name, version: f.version, start: r.start, end: r.end, href: f.href, path: f.path };
+  }
+  function linkTraceRefs(html) {  // trace:… in a rendered comment becomes a link to those lines
+    return html.split(/(<[^>]+>)/).map((part) => (part.startsWith('<') ? part : part.replace(TREF_TEXT, (m) => {
+      const raw = /#L/.test(m) ? m : m.replace(/[.,;:]+$/, '');
+      return `<a href="#" class="al-tref-live" data-tref-live="${AL.esc(raw)}">${AL.esc(raw)}</a>${m.slice(raw.length)}`;
+    }))).join('');
+  }
+  const traceText = new Map();
+  const canFetchTrace = () => sync.http && typeof DecompressionStream === 'function';
+  function loadTrace(url) {
+    if (!traceText.has(url)) {
+      const p = (async () => {
+        const r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`The trace did not load (${r.status}).`);
+        const buf = new Uint8Array(await r.arrayBuffer());
+        const gz = buf.length > 1 && buf[0] === 0x1f && buf[1] === 0x8b;  // a server may have unzipped it already
+        const text = gz ? await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).text()
+          : new TextDecoder().decode(buf);
+        return text.replace(/\n$/, '').split(/\r?\n/);
+      })();
+      p.catch(() => traceText.delete(url));
+      traceText.set(url, p);
+    }
+    return traceText.get(url);
+  }
+  function openTrace(e, anchorEl) {
+    if (!e) return;
+    const box = h('div.al-trace-lines', { role: 'region', 'aria-label': 'Trace lines', tabindex: '0' });
+    const note = h('p.al-muted.al-trace-note');
+    const span = { lo: 0, hi: 0 };
+    const draw = (lines) => {
+      box.replaceChildren(...lines.map(([n, t]) => h('div.al-tl' + (e.start && n >= e.start && n <= e.end ? '.is-hit' : ''), null,
+        h('span.al-tl-n', null, String(n)), h('span.al-tl-t', null, t))));
+      const hit = box.querySelector('.is-hit');
+      if (hit) requestAnimationFrame(() => { box.scrollTop = Math.max(0, hit.offsetTop - box.clientHeight / 3); });
+    };
+    const more = async () => {
+      if (!canFetchTrace()) { note.textContent = 'Open this page with agentledger open to load more of the trace, or download it.'; return; }
+      note.textContent = 'Loading the trace…';
+      try {
+        const all = await loadTrace(e.href);
+        const s = e.start || 1, en = e.end || Math.min(all.length, 20);
+        if (!span.lo) { span.lo = Math.max(1, s - 3); span.hi = Math.min(all.length, en + 3); }
+        span.lo = Math.max(1, span.lo - 40); span.hi = Math.min(all.length, span.hi + 40);
+        draw(all.slice(span.lo - 1, span.hi).map((t, i) => [span.lo + i, t.length > 4000 ? t.slice(0, 4000) + ' …' : t]));
+        note.textContent = `Lines ${span.lo}–${span.hi} of ${all.length}.`;
+        if (e.start && e.start > all.length) note.textContent = `The trace has ${all.length} lines; this citation starts at line ${e.start}.`;
+      } catch (err) { note.textContent = err.message; }
+    };
+    const body = h('div.al-trace', null,
+      h('div.al-trace-where', null, h('code', null, e.ref), e.path ? h('span.al-muted', null, e.path) : null),
+      e.error ? h('p.al-trace-error', null, `This citation does not resolve: ${e.error}.`) : null,
+      e.error && !e.href ? null : box, note,
+      e.href ? h('a.al-trace-dl', { href: e.href, download: '' }, AL.iconEl('download'), 'Download the trace') : null);
+    if (e.lines) draw(e.lines);
+    else if (e.href) more();
+    const actions = [];
+    if (e.href) actions.push({ label: 'More context', run: () => { more(); return false; } });
+    actions.push({ label: 'Copy reference', run: () => {
+      AL.copy(`${e.ref}  (${e.path || e.name}${e.start ? ', ' + linesLabel(e) : ''})`)
+        .then((ok) => AL.toast(ok ? 'Copied: paste it into a comment or to your own AI' : 'Copy failed', ok ? '' : 'error'));
+      return false;
+    } });
+    if (sync.askBackend && anchorEl && article.contains(anchorEl) && !e.error) {
+      actions.push({ label: 'Ask about these lines', primary: true, run: () => askAboutTrace(e, anchorEl) });
+    }
+    AL.modal(`${e.name || 'Trace'} · ${linesLabel(e)}${e.version ? ` · v${e.version}` : ''}`, body, actions, { close: 'Close' });
+    const modals = document.querySelectorAll('.al-modal');
+    if (modals.length) modals[modals.length - 1].classList.add('al-modal-wide');
+  }
+  function askAboutTrace(e, el) {
+    const sec = el.closest('.al-module');
+    if (!sec) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const off = rangeOffsets(range, sec);
+    const anchor = { module: sec.dataset.module };
+    if (off) Object.assign(anchor, { quote: off.text.slice(off.start, off.end), prefix: off.text.slice(Math.max(0, off.start - 40), off.start),
+      suffix: off.text.slice(off.end, off.end + 40) });
+    startCompose(anchor, 'ask');
+    const ta = composerBox.querySelector('textarea');
+    if (ta) { ta.value = `${e.ref} — `; ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }
+  function setupTraces() {
+    $$('a[data-tref]', article).forEach((a) => {
+      const e = TRACES.refs[a.dataset.tref];
+      if (e) a.title = e.error ? `${e.ref}: ${e.error}` : `${e.ref} · ${linesLabel(e)} of ${e.name} (v${e.version}): click to see them`;
+    });
+    document.addEventListener('click', (ev) => {
+      const a = ev.target.closest('a[data-tref], a[data-tref-live], code.al-tname');
+      if (!a) return;
+      ev.preventDefault();
+      if (a.dataset.tref) openTrace(TRACES.refs[a.dataset.tref], a);
+      else openTrace(liveEntry(a.dataset.trefLive || a.textContent), null);
+    });
   }
 
   /* ============================================================ go */
@@ -1243,6 +1364,7 @@
   buildRail();
   buildPad();
   setupSelection();
+  setupTraces();
   setupKeys();
   comments.addRemote(D.comments, { silent: true });
   comments.onChange(render);

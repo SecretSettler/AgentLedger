@@ -169,6 +169,9 @@ flags anything out of place:
   It is the same as `agentledger sync`, and only the machine running `agentledger serve` gets it: it commits and
   pushes as you. A push that needs a password fails with git's message instead of waiting; run `agentledger sync`
   once in a terminal to set up credentials.
+- **Trace citations:** a number that links to `trace:run.log#L24` opens those lines of the trace, highlighted, with
+  more context on demand, **Copy reference** (for a comment or your own AI) and **Ask about these lines**. The cited
+  lines are kept in the page, so this works from a shared copy or a file opened from disk too.
 - **Comment / Ask:** select text, or use the icon on a module heading. Threads have go, reply, **Reply & ask**, resolve,
   edit and delete. Once the agent has answered, the thread is a conversation: type the next question in the box under
   the answer and press <kbd>Enter</kbd> (<kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line, **Reply only** to save
@@ -256,7 +259,9 @@ bundle, built pages included, is scanned again and nothing is written if anythin
 credential stops the share. Only the bundle changes, never your store, and `share` lists what it redacted, per file.
 Traces still show the work itself (commands, file contents the agent read), so send them to people you trust.
 
-**Reproducing it.** `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
+**Reproducing it.** Each claim the report backs with a trace links to the lines it rests on, in the page and in
+`agentledger trace show <report> 'trace:run.log#L24'`, so whoever reproduces it compares result by result, and their
+agent is told which lines each claim cites. `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
 and `link` commands; after `link`, their agent reads that checkout and can re-run the analysis there, in its
 sandbox. Publish from inside the repository the report is about, so the commit is recorded.
 

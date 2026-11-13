@@ -19,6 +19,7 @@ from . import __version__
 from . import comments as cm
 from .build import build
 from .gitsync import git
+from . import tracerefs
 from . import sandbox
 from .ask import (CODEX_FLAGS, AskError, answer_thread, build_prompt, plan, repo_checkout, resolve_backend,
                   review_key, thread_of)
@@ -48,11 +49,12 @@ How you did it: data, commands, environment, versions. Enough for someone to rep
 
 ## Findings {{#findings status=needs-review}}
 
-One claim per paragraph. Put evidence (numbers, tables, logs) next to each claim.
+One claim per paragraph. Put evidence (numbers, tables, logs) next to each claim, and point each number taken
+from a trace at its lines: [4721 us](trace:run.log#L120-L124), where run.log is attached with --trace.
 
 | Metric | Value | Source |
 |---|---:|---|
-| example | 0 | `path/to/log` |
+| example | 0 | [run.log](trace:run.log#L1) |
 
 ## Caveats {{#caveats}}
 
@@ -249,6 +251,46 @@ def cmd_trace_check(args) -> int:
     return 1 if found else 0
 
 
+def cmd_trace_show(args) -> int:
+    """Print the trace lines a citation points at, or list the traces a report can cite."""
+    store = open_store(args)
+    report = store.report(args.report)
+    if not report.latest:
+        raise LedgerError(f"{report.id} has no versions yet")
+    v = report.version(args.version) if args.version else report.latest
+    if not args.ref:
+        listed = False
+        for x in report.versions:
+            if x.number > v.number:
+                continue
+            for t in x.meta.get("traces", []):
+                listed = True
+                print(f"trace:{tracerefs.trace_name(t)}  v{x.number}  {human_size(t.get('bytes', 0))}  "
+                      f"{store.repo_path(x.path / t['path'])}")
+        if not listed:
+            print(f"{report.id} has no traces (publish attaches them with --trace)")
+        return 0
+    ref = tracerefs.parse(args.ref)
+    if ref is None:
+        raise LedgerError("write the citation as trace:<file>#L<first>-L<last> (agentledger trace show "
+                          f"{report.id} lists the files)")
+    found = tracerefs.resolve(report, v, ref)
+    if not found:
+        names = sorted({tracerefs.trace_name(t) for x in report.versions for t in x.meta.get("traces", [])})
+        raise LedgerError(f"no trace named {ref.name} in {report.id} up to v{v.number}"
+                          + (f"; it has: {', '.join(names)}" if names else "; it has no traces"))
+    x, t, path = found
+    got = tracerefs.excerpt(path, ref, context=args.context, max_lines=args.max_lines)
+    if "error" in got:
+        raise LedgerError(got["error"])
+    print(f"{store.repo_path(path)}  (v{x.number}{', ' + ref.lines() if ref.start else ''})")
+    width = len(str(got["lines"][-1][0])) if got["lines"] else 1
+    for n, text in got["lines"]:
+        mark = ">" if ref.start and ref.start <= n <= ref.end else " "
+        print(f"{mark}{n:>{width}} │ {text}")
+    return 0
+
+
 def cmd_publish(args) -> int:
     store = open_store(args)
     _, session = linked_session(args.link_session)
@@ -280,7 +322,14 @@ def cmd_publish(args) -> int:
     for src in traces:
         print(f"  trace:  {src}")
     for t in v.meta.get("traces", []):
-        print(f"          → {t['path']}  ({human_size(t['bytes'])}, home directory shown as ~)")
+        print(f"          → {t['path']}  ({human_size(t['bytes'])}, home directory shown as ~)  "
+              f"cite as trace:{tracerefs.trace_name(t)}#L<first>-L<last>")
+    problems = tracerefs.check(store, v.report, v)
+    for problem in problems:
+        print(f"warning: citation {problem}", file=sys.stderr)
+    if problems:
+        print(f"  {len(problems)} trace citation(s) do not resolve: fix them and publish again "
+              f"(agentledger trace show {v.report.id} lists the traces)", file=sys.stderr)
     if v.meta.get("session"):
         sess = v.meta["session"]
         shared = "shared as a reviewed copy" if shared_session else "not shared"
@@ -633,6 +682,14 @@ def cmd_check(args) -> int:
                 if pattern.search(text):
                     warnings.append(f"{store.rel(f)}: contains a path under your home directory ({home}); "
                                     "edit it out before sharing the store")
+    for project in store.projects():
+        for report in project.walk():
+            for v in report.versions:
+                try:
+                    for problem in tracerefs.check(store, report, v):
+                        warnings.append(f"{report.id} v{v.number}: trace citation {problem}")
+                except (OSError, ValueError, LedgerError) as exc:
+                    warnings.append(f"{report.id} v{v.number}: cannot check trace citations ({exc})")
     try:
         ids = {}
         for row in store.comments():
@@ -1082,7 +1139,8 @@ def make_parser() -> argparse.ArgumentParser:
     serve_options(s)
     s.set_defaults(func=cmd_serve, path=None)
 
-    t = sub.add_parser("trace", help="prepare, approve or check the session copy a report shares (publish --trace auto)")
+    t = sub.add_parser("trace", help="prepare, approve or check the session copy a report shares (publish --trace auto); "
+                                      "show cited trace lines")
     tsub = t.add_subparsers(dest="tcmd", required=True, metavar="action")
     s = tsub.add_parser("prepare", help="write a shareable copy of the session: the conversation only, secrets redacted")
     s.add_argument("report", help="<project>/<report> it is for")
@@ -1097,6 +1155,14 @@ def make_parser() -> argparse.ArgumentParser:
     s = tsub.add_parser("approve", help="mark the prepared copy reviewed (checked again for secrets first)")
     s.add_argument("report")
     s.set_defaults(func=cmd_trace_approve)
+    s = tsub.add_parser("show", help="print the trace lines a citation points at (trace:<file>#L<a>-L<b>), "
+                                     "or list the traces a report can cite")
+    s.add_argument("report")
+    s.add_argument("ref", nargs="?", help="trace:<file>#L<first>-L<last> (omit to list the traces)")
+    s.add_argument("--version", type=int, help="the version citing it (default: the latest)")
+    s.add_argument("-C", "--context", type=int, default=3, help="lines of context around the cited ones")
+    s.add_argument("--max-lines", type=int, default=200)
+    s.set_defaults(func=cmd_trace_show)
     s = tsub.add_parser("check", help="look for secrets and credentials in files (exit 1 if any)")
     s.add_argument("files", nargs="+")
     s.set_defaults(func=cmd_trace_check)

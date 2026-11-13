@@ -92,6 +92,8 @@ def safe_url(value: str, attr: str, tag: str) -> str | None:
     scheme = m.group(1).lower()
     if scheme in SAFE_SCHEMES and attr != "xlink:href":
         return value
+    if scheme == "trace" and attr == "href" and tag == "a":
+        return value  # a trace citation: build turns it into a link to the excerpt kept in the page
     if scheme == "data" and attr == "src" and tag in ("img", "source") and DATA_IMAGE_RE.match(v):
         return value
     return None

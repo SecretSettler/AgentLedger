@@ -186,6 +186,134 @@ class StoreFlowTests(unittest.TestCase):
         self.assertTrue((self.root / "projects/p/r/v002/img/p.png").exists())
 
 
+def page_data(page: str) -> dict:
+    raw = re.search(r'id="al-data">(.*?)</script>', page, re.S).group(1)
+    return json.loads(raw.replace("<\\/", "</").replace("<\\!--", "<!--"))
+
+
+class TraceCitationTests(unittest.TestCase):
+    """A claim points at the trace lines behind it: [4721 us](trace:run.log#L51)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(init_store(self.tmp / "store", name="T"))
+        self.log = self.tmp / "run.log"
+        self.log.write_text("".join(f"line {i}: step {i}\n" for i in range(1, 51)) + "result: 4721 us\n")
+        logs = self.tmp / "logs"
+        logs.mkdir()
+        (logs / "gpu.txt").write_text("gpu 0 idle\ngpu 1 busy\n")
+        self.draft = self.tmp / "r.md"
+        self.draft.write_text("# R\n\n## Results {#results}\n\nIt took [4721 us](trace:run.log#L51) after "
+                              "[warm-up](trace:run.log#L3-L5) on [a busy gpu](trace:gpu.txt#L2); "
+                              "[too far](trace:run.log#L900) and [missing](trace:nope.txt#L1).\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def publish(self, draft=None, **kw):
+        return self.store.publish("p/r", draft or self.draft, **kw)
+
+    def test_citations_become_links_to_excerpts(self):
+        v = self.publish(traces=[self.log, self.tmp / "logs"])
+        build(self.store)
+        page = (v.path / "index.html").read_text()
+        self.assertIn('data-tref="tr1">4721 us</a>', page)
+        self.assertNotIn('href="trace:', page)
+        refs = page_data(page)["traces"]["refs"]
+        by_ref = {e["ref"]: e for e in refs.values()}
+        self.assertIn([51, "result: 4721 us"], by_ref["trace:run.log#L51"]["lines"])
+        self.assertEqual(by_ref["trace:run.log#L3-L5"]["lines"][0], [1, "line 1: step 1"])          # 3 lines of context
+        self.assertEqual(by_ref["trace:gpu.txt#L2"]["name"], "logs/gpu.txt")                         # found by file name
+        self.assertIn("51 lines", by_ref["trace:run.log#L900"]["error"])
+        self.assertIn("no trace named nope.txt", by_ref["trace:nope.txt#L1"]["error"])
+        self.assertIn('data-tref-error="1">too far</a>', page)
+        files = {f["name"]: f for f in page_data(page)["traces"]["files"]}
+        self.assertEqual(files["run.log"]["cited"], 3)
+        self.assertIn("trace:run.log</code>", page)                                                 # footer: cite it as
+        from agentledger import tracerefs
+        self.assertEqual(len(tracerefs.check(self.store, v.report, v)), 2)
+
+    def test_later_versions_and_named_versions(self):
+        self.publish(traces=[self.log])
+        v2 = self.tmp / "v2.md"
+        v2.write_text("# R\n\n## Results {#results}\n\n[Still](trace:run.log#L51) and [pinned](trace:v1/run.log#L2).\n")
+        v = self.publish(v2)                                                                      # no traces of its own
+        build(self.store)
+        refs = {e["ref"]: e for e in page_data((v.path / "index.html").read_text())["traces"]["refs"].values()}
+        self.assertEqual(refs["trace:run.log#L51"]["version"], 1)
+        self.assertEqual(refs["trace:v1/run.log#L2"]["version"], 1)
+        self.assertNotIn("error", refs["trace:run.log#L51"])
+
+    def test_only_links_keep_the_trace_scheme(self):
+        out = sanitize('<a href="trace:run.log#L2">x</a><img src="trace:run.log"><a href="javascript:alert(1)">y</a>')
+        self.assertIn('href="trace:run.log#L2"', out)
+        self.assertNotIn('src="trace:', out)
+        self.assertNotIn("javascript", out)
+
+    def test_publish_and_check_warn_about_citations_that_do_not_resolve(self):
+        fake_claude_session(self.tmp / "claude", self.tmp)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "claude")}):
+            code, out, err = run_err("--store", str(self.store.root), "publish", "p/r", str(self.draft),
+                                     "--trace", str(self.log), "--link-session", SID)
+        self.assertEqual(code, 0, err)
+        self.assertIn("citation trace:run.log#L900", err)
+        self.assertIn("cite as trace:run.log#L<first>-L<last>", out)
+        code, out = run("--store", str(self.store.root), "check")
+        self.assertIn("trace citation trace:nope.txt#L1", out)
+
+    def test_trace_show(self):
+        self.publish(traces=[self.log])
+        code, out = run("--store", str(self.store.root), "trace", "show", "p/r", "trace:run.log#L3-L4", "-C", "1")
+        self.assertEqual(code, 0, out)
+        self.assertIn(">3 │ line 3: step 3", out)
+        self.assertIn(" 5 │ line 5: step 5", out)
+        code, out = run("--store", str(self.store.root), "trace", "show", "p/r")
+        self.assertIn("trace:run.log  v1", out)
+        code, out, err = run_err("--store", str(self.store.root), "trace", "show", "p/r", "trace:other.log#L1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("it has: run.log", err)
+
+    def test_ask_sees_what_the_module_cites_and_what_the_reviewer_points_at(self):
+        from agentledger.ask import build_prompt
+        self.publish(traces=[self.log])
+        row = self.store.add_comment("p/r", "compare with trace:run.log#L3-L5.", module="results", quote="It took 4721 us", author="dan")
+        prompt, _ = build_prompt(self.store, row["id"])
+        self.assertIn('- "4721 us" → trace:run.log#L51 = ', prompt)
+        self.assertIn(".cache/projects/p/r/v001/traces/run.log, line 51 (v1)", prompt)
+        self.assertIn("the trace has 51 lines", prompt)                        # the citation past the end says so
+        self.assertIn("Trace lines the reviewer points at:\n- trace:run.log#L3-L5 = ", prompt)
+        self.assertIn("cite it as trace:run.log", prompt)
+
+    def test_text_references(self):
+        from agentledger import tracerefs
+        refs = tracerefs.find("see trace:run.log#L12-L14, and trace:v2/logs/a.txt. Also trace:x.log#L3")
+        self.assertEqual([r.text() for r in refs], ["trace:run.log#L12-L14", "trace:v2/logs/a.txt", "trace:x.log#L3"])
+        self.assertIsNone(tracerefs.parse("trace:../etc/passwd#L1"))
+        self.assertIsNone(tracerefs.parse("trace:a.log#L5-L2"))
+
+    def test_shared_transcript_keeps_its_line_numbers(self):
+        """A raw transcript is trimmed when shared, but a citation's line still points at the same record."""
+        from agentledger import share
+        raw = self.tmp / "session.jsonl"
+        rows = [{"type": "session-owner", "accountUuid": "acct-1", "sessionId": SID},
+                {"type": "user", "isMeta": True, "sessionId": SID, "message": {"role": "user", "content": "MEMORY"}},
+                {"type": "assistant", "sessionId": SID, "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "measured 4721 us on run 7"}]}}]
+        raw.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        draft = self.tmp / "s.md"
+        draft.write_text("# S\n\n## Results {#results}\n\n[4721 us](trace:session.jsonl#L3)\n")
+        self.publish(draft, traces=[raw])
+        bundle = self.tmp / "s.agentledger.zip"
+        share.pack(self.store, "p/r", bundle)
+        reader, _ = share.unpack(bundle, self.tmp / "reader")
+        page = (reader.root / "projects/p/r/v001/index.html").read_text()
+        entry = next(iter(page_data(page)["traces"]["refs"].values()))
+        hit = [t for n, t in entry["lines"] if n == 3][0]
+        self.assertIn("measured 4721 us on run 7", hit)
+        self.assertNotIn("acct-1", json.dumps(entry))
+        self.assertNotIn("MEMORY", json.dumps(entry))
+
+
 class HtmlReportTests(unittest.TestCase):
     """HTML reports keep their own CSS and title; the viewer's reading typography is for Markdown only."""
 

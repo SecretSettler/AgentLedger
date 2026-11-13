@@ -22,6 +22,15 @@
   by the agent) and syncs; someone outside it gets one report as a file, written outside the working repository,
   with internal threads left out on request; someone on the network gets `serve --share`. New `/agentledger:share`
   command; `agentledger` alone now shows the store's remote and what is waiting to be pushed.
+- **Trace citations.** A report points a claim at the trace lines behind it: `[4721 us](trace:run.log#L120-L124)`
+  (`trace:v2/...` for another version's trace). Build resolves each one and keeps the cited lines in the page, so a
+  click shows them highlighted, from a served store, a file opened from disk or a shared bundle; when served, **More
+  context** loads the rest of the trace. **Copy reference** and **Ask about these lines** take them to a comment or
+  an agent; `trace:` references typed in comments and answers are links too. `publish` and `agentledger check` warn
+  about citations that do not resolve, `agentledger trace show <report> [<ref>]` prints the lines (or lists the
+  traces), the footer shows each trace's citation name and how often it is cited, and Ask is told which lines the
+  module cites and the reviewer points at, and answers in the same form. Sharing keeps a raw transcript's line
+  numbers while trimming it, so citations still land on the same record. The demo report cites its run log.
 - Redaction no longer takes a call (`n_tokens = schedule_for_x(`) for an assigned secret, and no longer counts a
   JSON-escaped decorator (`\n@pytest.fixture`) as an e-mail address.
 
