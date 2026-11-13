@@ -169,6 +169,9 @@ flags anything out of place:
   It is the same as `agentledger sync`, and only the machine running `agentledger serve` gets it: it commits and
   pushes as you. A push that needs a password fails with git's message instead of waiting; run `agentledger sync`
   once in a terminal to set up credentials.
+- **Trace citations:** a number that links to `trace:run.log#L24` opens those lines of the trace, highlighted, with
+  more context on demand, **Copy reference** (for a comment or your own AI) and **Ask about these lines**. The cited
+  lines are kept in the page, so this works from a shared copy or a file opened from disk too.
 - **Comment / Ask:** select text, or use the icon on a module heading. Threads have go, reply, **Reply & ask**, resolve,
   edit and delete. Once the agent has answered, the thread is a conversation: type the next question in the box under
   the answer and press <kbd>Enter</kbd> (<kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line, **Reply only** to save
@@ -256,7 +259,19 @@ bundle, built pages included, is scanned again and nothing is written if anythin
 credential stops the share. Only the bundle changes, never your store, and `share` lists what it redacted, per file.
 Traces still show the work itself (commands, file contents the agent read), so send them to people you trust.
 
-**Reproducing it.** `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
+**Reproducing it.** Each claim the report backs with a trace links to the lines it rests on, in the page and in
+`agentledger trace show <report> 'trace:run.log#L24'`, so whoever reproduces it compares result by result, and their
+agent is told which lines each claim cites.
+
+Raw traces too large or too private for the store can stay in a **trace store**: TrajFS experiment batches published
+as GitHub releases (one release per batch: `batch.json`, a `capture.json` per run with every file's SHA256, the
+run's TrajFS store in parts). `publish --trace-batch <release link>` records the batch's runs and file lists on the
+version, never the traces, and a citation names a file by its run's path and its path in the run:
+`trace:exp-a/runs/r1/sessions/<id>/session.v3.jsonl#L2559`. Clicking it shows the batch, run, file and
+SHA256; `agentledger trace get <report> '<ref>'` downloads only that run with the reader's own GitHub access, checks
+every asset and the file against the capture, restores it with TrajFS (`traj`, or `--raw-root` with an original
+copy) and keeps it in the store's `.cache`, where the page, `trace show` and Ask read it. The cited lines of a
+trace-store file are never written into a page, and `serve --share` never serves `.cache` to other machines. `open` prints the repository and commit the report describes, with the `git clone`, `checkout`
 and `link` commands; after `link`, their agent reads that checkout and can re-run the analysis there, in its
 sandbox. Publish from inside the repository the report is about, so the commit is recorded.
 

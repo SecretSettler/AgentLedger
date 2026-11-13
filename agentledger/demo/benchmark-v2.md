@@ -7,7 +7,7 @@ tags: [benchmark, compile]
 
 # Harness agent vs. recorded agents on six benchmark tasks
 
-The outcome first: the harness agent passed all six tasks' hidden verifiers on its first `finish`, in 32 model calls, 210,172 output tokens and 41 minutes of wall time in all, against the recorded agents' 98 environment calls. Its final programs are 6 to 29 KB of C and run in 0.27 ms to 1.9 s of guest time.
+The outcome first: the harness agent [passed all six tasks' hidden verifiers on its first `finish`](trace:harness-run.log#L21), [in 32 model calls, 210,172 output tokens and 41 minutes of wall time](trace:harness-run.log#L22) in all, against the recorded agents' 98 environment calls. Its final programs are 6 to 29 KB of C and run in 0.27 ms to 1.9 s of guest time.
 
 ## Setup {#setup}
 
@@ -30,11 +30,11 @@ Both agents start from the same instruction and the same input bytes. The first 
 | Bayesian network, R | 39,560 | 25,771 | 5 | 18 |
 | Checkpoint diagnosis | 15,578 | 61,220 | 4 | 13 |
 
-Where the two agents' computations are the same work, the programs run at the speed of the paper's artifacts. Where the recorded agent computed the answer in its head (the scheduling task) or reproduced a long diagnostic trajectory (the checkpoint task), the gap is explained rather than ratioed.
+Per-task counts are in [the harness log](trace:harness-run.log#L3-L20). Where the two agents' computations are the same work, the programs run at the speed of the paper's artifacts. Where the recorded agent computed the answer in its head (the scheduling task) or reproduced a long diagnostic trajectory (the checkpoint task), the gap is explained rather than ratioed.
 
 ### Why harness output tokens run higher
 
-The harness agent's output is dominated by program text: every call re-emits the full C file (6–29 KB, roughly 2,000–9,000 tokens), and the scheduling task needed seven iterations of a solver. The recorded agent's output is mostly short shell commands; its large inputs (logs, tool output) are *input* tokens and do not appear in this column. Excluding re-emitted source, harness output falls to 48,310 tokens, below the recorded 177,399.
+The harness agent's output is dominated by program text: every call re-emits the full C file (6–29 KB, roughly 2,000–9,000 tokens), and the scheduling task needed seven iterations of a solver. The recorded agent's output is mostly short shell commands; its large inputs (logs, tool output) are *input* tokens and do not appear in this column. Excluding re-emitted source, harness output falls to [48,310 tokens](trace:harness-run.log#L24), below the [recorded 177,399](trace:harness-run.log#L25).
 
 ### Per-task notes
 
@@ -47,7 +47,7 @@ Output tokens are counted with the same tokenizer for both agents; the recorded 
 
 ## Compile vs. patch {#compile-vs-patch}
 
-Every harness turn recompiles the whole program. Incremental patching would cut compile time, but compile time is already under 2% of wall time.
+Every harness turn recompiles the whole program. Incremental patching would cut compile time, but compile time is already [under 2% of wall time](trace:harness-run.log#L23).
 
 ## Limits {#limits}
 

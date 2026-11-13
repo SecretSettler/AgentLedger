@@ -513,7 +513,7 @@
     toastTimer = setTimeout(() => t.classList.remove('is-on'), kind === 'error' ? 5000 : 2600);
   };
 
-  AL.modal = function (title, body, actions) {
+  AL.modal = function (title, body, actions, opts) {
     const back = AL.h('div.al-modal-backdrop');
     const close = () => { back.remove(); document.removeEventListener('keydown', onKey, true); };
     const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
@@ -522,7 +522,7 @@
       AL.h('h3', null, title), body,
       AL.h('div.al-modal-actions', null, ...(actions || []).map((a) => AL.h('button.al-btn' + (a.primary ? '.is-primary' : ''), {
         onClick: () => { if (a.run && a.run() === false) return; close(); },
-      }, a.label)), AL.h('button.al-btn', { onClick: close }, actions && actions.length ? 'Cancel' : 'Close')));
+      }, a.label)), AL.h('button.al-btn', { onClick: close }, (opts && opts.close) || (actions && actions.length ? 'Cancel' : 'Close'))));
     back.appendChild(box);
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(back);

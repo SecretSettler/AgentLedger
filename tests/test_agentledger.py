@@ -186,6 +186,383 @@ class StoreFlowTests(unittest.TestCase):
         self.assertTrue((self.root / "projects/p/r/v002/img/p.png").exists())
 
 
+def page_data(page: str) -> dict:
+    raw = re.search(r'id="al-data">(.*?)</script>', page, re.S).group(1)
+    return json.loads(raw.replace("<\\/", "</").replace("<\\!--", "<!--"))
+
+
+FAKE_TRAJ = """
+import shutil, sys
+from pathlib import Path
+argv = sys.argv[1:]
+assert argv[0] == "extract" and argv[1] == "-S", argv
+store, path, out = Path(argv[2]), argv[3], Path(argv[4])
+src = store / "files" / path
+if not src.is_file():
+    print("no such file in store: " + path, file=sys.stderr); sys.exit(2)
+(out / path).parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(src, out / path)
+"""
+
+
+class FakeRelease:
+    """A trace-store batch release on disk: batch.json, captures, TrajFS parts, checksums; served like GitHub."""
+
+    def __init__(self, root: Path, tag: str, runs: dict):
+        import hashlib, io as _io, tarfile as _tar
+        self.repo, self.tag, self.assets, self.downloads = "o/trace-store", tag, {}, []
+        sha = lambda b: hashlib.sha256(b).hexdigest()
+        batch_runs = []
+        for rid, (source, files) in runs.items():
+            buf = _io.BytesIO()
+            with _tar.open(fileobj=buf, mode="w") as tf:
+                for name, data in [("trace.trajstore/MANIFEST.json", b"{}")] + [
+                        (f"trace.trajstore/files/{p}", d.encode()) for p, d in files.items()]:
+                    info = _tar.TarInfo(name)
+                    info.size = len(data)
+                    tf.addfile(info, _io.BytesIO(data))
+            blob = buf.getvalue()
+            parts = {f"{rid}.trace.trajstore.tar.part{i:04d}": blob[i * 4096:(i + 1) * 4096]
+                     for i in range((len(blob) + 4095) // 4096)}
+            capture = {"schema": 1, "run_id": rid, "source": source, "fingerprint": "fp-" + rid, "trajfs_commit": "abc123",
+                       "files": [{"path": p, "sha256": sha(d.encode()), "size": len(d.encode()), "mode": 420, "mtime_ns": 0}
+                                 for p, d in files.items()]}
+            cap = json.dumps(capture).encode()
+            self.assets[f"{rid}.capture.json"] = cap
+            self.assets.update(parts)
+            batch_runs.append({"id": rid, "source": source, "files": len(files), "fingerprint": "fp-" + rid,
+                               "capture_asset": f"{rid}.capture.json", "parts": sorted(parts),
+                               "asset_hashes": {n: sha(b) for n, b in [(f"{rid}.capture.json", cap), *parts.items()]}})
+        self.assets["batch.json"] = json.dumps({"schema": 1, "id": tag, "runs": batch_runs, "blocked": []}).encode()
+        self.assets["checksums.json"] = json.dumps({n: sha(b) for n, b in self.assets.items()}).encode()
+        self.ids = {n: i + 1 for i, n in enumerate(sorted(self.assets))}
+
+    def github(self):
+        release = self
+
+        class FakeGitHub:
+            def __init__(self, token=None):
+                pass
+
+            def release(self, repo, tag, release_id=None):
+                if (repo, tag) != (release.repo, release.tag):
+                    raise tracebatch.BatchError(f"GitHub answered 404 for {repo}")
+                return {"id": 7, "html_url": f"https://github.com/{repo}/releases/tag/{tag}", "name": tag, "draft": False,
+                        "assets": [{"id": release.ids[n], "name": n, "size": len(b)} for n, b in release.assets.items()]}
+
+            def download(self, repo, asset, dest, expected=None):
+                import hashlib
+                data = release.assets[asset["name"]]
+                release.downloads.append(asset["name"])
+                if expected and hashlib.sha256(data).hexdigest() != expected:
+                    raise tracebatch.BatchError(f"{asset['name']} failed its SHA256 check")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                return dest
+
+        return FakeGitHub
+
+
+from agentledger import tracebatch  # noqa: E402
+
+
+class TraceBatchTests(unittest.TestCase):
+    """Citations into a trace-store batch: the raw trace stays in its release until a reader fetches that run."""
+
+    SESSION = "".join(f'{{"n": {i}, "text": "step {i}"}}\n' for i in range(1, 21))
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.env = mock.patch.dict(os.environ, {"AGENTLEDGER_TRACE_CACHE": str(self.tmp / "dl"), "HOME": str(self.tmp / "home")})
+        self.env.start()
+        self.store = Store(init_store(self.tmp / "store", name="T"))
+        self.release = FakeRelease(self.tmp, "2026-11-11-exp-v1", {
+            "exp-r1-aaa": ("/data/exp/peer/runs/r1", {"sessions/s1/session.v3.jsonl": self.SESSION, "logs/job.log": "ok r1\n",
+                                                      "TASK.md": "the same task\n"}),
+            "exp-r2-bbb": ("/data/exp/peer/runs/r2", {"sessions/s2/session.v3.jsonl": "x\n", "logs/job.log": "ok r2\n",
+                                                      "TASK.md": "the same task\n"}),
+        })
+        self.gh = mock.patch.object(tracebatch, "GitHub", self.release.github())
+        self.gh.start()
+        self.traj = self.tmp / "traj"
+        self.traj.write_text(f"#!{sys.executable}\n" + FAKE_TRAJ)
+        self.traj.chmod(0o755)
+        draft = self.tmp / "r.md"
+        draft.write_text("# R\n\n## Results {#results}\n\nThe lead [saw step 3](trace:runs/r1/sessions/s1/session.v3.jsonl#L3), "
+                         "[r2's job](trace:runs/r2/logs/job.log#L1), [either job](trace:logs/job.log#L1) and "
+                         "[nothing](trace:runs/r1/missing.txt#L1).\n")
+        self.v = self.store.publish("p/r", draft)
+
+    def tearDown(self):
+        self.gh.stop()
+        self.env.stop()
+        shutil.rmtree(self.tmp)
+
+    def add(self):
+        return run("--store", str(self.store.root), "trace", "batch", "add", "p/r", "o/trace-store@2026-11-11-exp-v1")
+
+    def page_refs(self):
+        page = (self.store.report("p/r").latest.path / "index.html").read_text()
+        return {e["ref"]: e for e in page_data(page)["traces"]["refs"].values()}, page
+
+    def test_batch_citations_resolve_without_the_raw_trace(self):
+        code, out = self.add()
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 runs, 6 files listed", out)
+        self.assertEqual(self.release.downloads.count("exp-r1-aaa.trace.trajstore.tar.part0000"), 0)   # no raw trace
+        refs, page = self.page_refs()
+        e = refs["trace:runs/r1/sessions/s1/session.v3.jsonl#L3"]
+        self.assertEqual((e["kind"], e["batch"]["run"], e["name"]), ("batch", "exp-r1-aaa", "sessions/s1/session.v3.jsonl"))
+        self.assertNotIn("lines", e)                                   # the trace's text never goes into the page
+        self.assertIn("agentledger trace get p/r 'trace:runs/r1/sessions/s1/session.v3.jsonl#L3'", e["fetch"])
+        self.assertEqual(refs["trace:runs/r2/logs/job.log#L1"]["batch"]["run"], "exp-r2-bbb")
+        self.assertIn("more than one run", refs["trace:logs/job.log#L1"]["error"])   # different bytes: say which
+        from agentledger import tracebatch as tb
+        self.store.invalidate()
+        report = self.store.report("p/r")
+        same = tb.resolve(report, report.latest, "TASK.md")                          # the same bytes in both runs
+        cost = lambda r: (sum(p["size"] for p in r["parts"]), r["id"])
+        self.assertEqual(same.run["id"], min(same.batch["runs"], key=cost)["id"])    # the cheapest download
+        self.assertIn("trace-store batches", refs["trace:runs/r1/missing.txt#L1"]["error"])
+        self.assertIn("Trace-store batches", page)
+        self.assertNotIn("step 20", page)                              # a line of the trace the report does not quote
+
+    def test_trace_get_fetches_one_run_and_checks_it(self):
+        self.add()
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "-C", "1", "--traj", str(self.traj))
+        self.assertEqual(code, 0, err)
+        self.assertIn('>3 │ {"n": 3, "text": "step 3"}', out)
+        self.assertIn("verified: SHA256 and size match", err)
+        self.assertNotIn("exp-r2-bbb.trace.trajstore.tar.part0000", self.release.downloads)       # only that run
+        cached = self.store.root / ".cache/trace-store/2026-11-11-exp-v1/exp-r1-aaa/sessions/s1/session.v3.jsonl"
+        self.assertEqual(cached.read_text(), self.SESSION)
+        self.assertTrue(cached.with_name(cached.name + ".receipt.json").is_file())
+        before = len(self.release.downloads)
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L4",
+            "--traj", str(self.traj))
+        self.assertEqual(len(self.release.downloads), before)                                      # already verified
+        code, out = run("--store", str(self.store.root), "trace", "show", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L5")
+        self.assertIn('>5 │', out)
+
+    def test_bytes_that_do_not_match_are_refused(self):
+        self.add()
+        part = "exp-r1-aaa.trace.trajstore.tar.part0000"
+        self.release.assets[part] = self.release.assets[part][:-1] + b"X"
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "--traj", str(self.traj))
+        self.assertNotEqual(code, 0)
+        self.assertIn("SHA256", err)
+        raw = self.tmp / "raw"
+        (raw / "sessions/s1").mkdir(parents=True)
+        (raw / "sessions/s1/session.v3.jsonl").write_text(self.SESSION + "tampered\n")
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "--raw-root", str(raw))
+        self.assertNotEqual(code, 0)
+        self.assertIn("does not match the SHA256", err)
+        (raw / "sessions/s1/session.v3.jsonl").write_text(self.SESSION)
+        code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "--raw-root", str(raw))
+        self.assertEqual(code, 0, err)
+
+    def test_without_traj_it_says_what_is_needed(self):
+        self.add()
+        with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "empty"), "AGENTLEDGER_TRAJ": ""}):
+            code, out, err = run_err("--store", str(self.store.root), "trace", "get", "p/r",
+                                     "trace:runs/r1/sessions/s1/session.v3.jsonl#L3")
+        self.assertNotEqual(code, 0)
+        self.assertIn("needs `traj`", err)
+        self.assertIn("abc123", err)                                   # the TrajFS commit the batch was packed with
+
+    def test_ask_is_told_where_the_lines_are(self):
+        from agentledger.ask import build_prompt
+        self.add()
+        self.store.invalidate()                                        # Ask reloads the store before each question
+        row = self.store.add_comment("p/r", "really?", module="results", quote="saw step 3", author="dan")
+        prompt, _ = build_prompt(self.store, row["id"])
+        self.assertIn("not fetched on this machine", prompt)
+        self.assertIn("agentledger trace get p/r 'trace:runs/r1/sessions/s1/session.v3.jsonl#L3'", prompt)
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L3",
+            "--traj", str(self.traj))
+        prompt, _ = build_prompt(self.store, row["id"])
+        self.assertIn(".cache/trace-store/2026-11-11-exp-v1/exp-r1-aaa/sessions/s1/session.v3.jsonl, line 3", prompt)
+
+    def test_publish_records_the_batch(self):
+        fake_claude_session(self.tmp / "claude", self.tmp)
+        draft = self.tmp / "v2.md"
+        draft.write_text("# R\n\n## Results {#results}\n\n[log](trace:runs/r2/logs/job.log#L1)\n")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "claude")}):
+            code, out, err = run_err("--store", str(self.store.root), "publish", "p/r", str(draft), "--link-session", SID,
+                                     "--trace-batch", "https://github.com/o/trace-store/releases/tag/2026-11-11-exp-v1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("trace batch: o/trace-store@2026-11-11-exp-v1", out)
+        self.assertNotIn("citation", err)
+        code, out = run("--store", str(self.store.root), "trace", "batch", "list", "p/r")
+        self.assertIn("v2  o/trace-store@2026-11-11-exp-v1  2 run(s)", out)
+
+    def test_a_shared_report_keeps_its_batches_but_no_raw_trace(self):
+        """The reader of a bundle gets the batch's file lists, fetches the run with their own access, and checks it."""
+        from agentledger import share
+        self.add()
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L3",
+            "--traj", str(self.traj))                                   # the author's own fetched copy must not travel
+        bundle = self.tmp / "r.agentledger.zip"
+        share.pack(self.store, "p/r", bundle)
+        with zipfile.ZipFile(bundle) as z:
+            names = z.namelist()
+            self.assertIn("projects/p/r/v001/trace-batches/2026-11-11-exp-v1.json", names)
+            self.assertFalse([n for n in names if ".cache" in n or ".part" in n])
+            index = json.loads(z.read("projects/p/r/v001/trace-batches/2026-11-11-exp-v1.json"))
+        mine = json.loads((self.store.root / "projects/p/r/v001/trace-batches/2026-11-11-exp-v1.json").read_text())
+        self.assertEqual(index["runs"], mine["runs"])                   # file lists and SHA256s arrive unchanged
+        reader, _ = share.unpack(bundle, self.tmp / "reader")
+        code, out, err = run_err("--store", str(reader.root), "trace", "get", "p/r",
+                                 "trace:runs/r1/sessions/s1/session.v3.jsonl#L3", "-C", "0", "--traj", str(self.traj))
+        self.assertEqual(code, 0, err)
+        self.assertIn('>3 │ {"n": 3, "text": "step 3"}', out)
+
+    def test_shared_viewers_never_get_the_cache(self):
+        self.add()
+        run("--store", str(self.store.root), "trace", "get", "p/r", "trace:runs/r1/sessions/s1/session.v3.jsonl#L3",
+            "--traj", str(self.traj))
+        httpd = serve(self.store, port=0, quiet=True, share=True)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+        url = f"http://127.0.0.1:{port}/.cache/trace-store/2026-11-11-exp-v1/exp-r1-aaa/sessions/s1/session.v3.jsonl"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url)) as r:
+                self.assertEqual(r.read().decode(), self.SESSION)           # this machine
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(urllib.request.Request(url, headers={"Host": "192.168.7.7"}))
+            self.assertEqual(caught.exception.code, 403)                    # a teammate on the LAN
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class TraceCitationTests(unittest.TestCase):
+    """A claim points at the trace lines behind it: [4721 us](trace:run.log#L51)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Store(init_store(self.tmp / "store", name="T"))
+        self.log = self.tmp / "run.log"
+        self.log.write_text("".join(f"line {i}: step {i}\n" for i in range(1, 51)) + "result: 4721 us\n")
+        logs = self.tmp / "logs"
+        logs.mkdir()
+        (logs / "gpu.txt").write_text("gpu 0 idle\ngpu 1 busy\n")
+        self.draft = self.tmp / "r.md"
+        self.draft.write_text("# R\n\n## Results {#results}\n\nIt took [4721 us](trace:run.log#L51) after "
+                              "[warm-up](trace:run.log#L3-L5) on [a busy gpu](trace:gpu.txt#L2); "
+                              "[too far](trace:run.log#L900) and [missing](trace:nope.txt#L1).\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def publish(self, draft=None, **kw):
+        return self.store.publish("p/r", draft or self.draft, **kw)
+
+    def test_citations_become_links_to_excerpts(self):
+        v = self.publish(traces=[self.log, self.tmp / "logs"])
+        build(self.store)
+        page = (v.path / "index.html").read_text()
+        self.assertIn('data-tref="tr1">4721 us</a>', page)
+        self.assertNotIn('href="trace:', page)
+        refs = page_data(page)["traces"]["refs"]
+        by_ref = {e["ref"]: e for e in refs.values()}
+        self.assertIn([51, "result: 4721 us"], by_ref["trace:run.log#L51"]["lines"])
+        self.assertEqual(by_ref["trace:run.log#L3-L5"]["lines"][0], [1, "line 1: step 1"])          # 3 lines of context
+        self.assertEqual(by_ref["trace:gpu.txt#L2"]["name"], "logs/gpu.txt")                         # found by file name
+        self.assertIn("51 lines", by_ref["trace:run.log#L900"]["error"])
+        self.assertIn("no trace named nope.txt", by_ref["trace:nope.txt#L1"]["error"])
+        self.assertIn('data-tref-error="1">too far</a>', page)
+        files = {f["name"]: f for f in page_data(page)["traces"]["files"]}
+        self.assertEqual(files["run.log"]["cited"], 3)
+        self.assertIn("trace:run.log</code>", page)                                                 # footer: cite it as
+        from agentledger import tracerefs
+        self.assertEqual(len(tracerefs.check(self.store, v.report, v)), 2)
+
+    def test_later_versions_and_named_versions(self):
+        self.publish(traces=[self.log])
+        v2 = self.tmp / "v2.md"
+        v2.write_text("# R\n\n## Results {#results}\n\n[Still](trace:run.log#L51) and [pinned](trace:v1/run.log#L2).\n")
+        v = self.publish(v2)                                                                      # no traces of its own
+        build(self.store)
+        refs = {e["ref"]: e for e in page_data((v.path / "index.html").read_text())["traces"]["refs"].values()}
+        self.assertEqual(refs["trace:run.log#L51"]["version"], 1)
+        self.assertEqual(refs["trace:v1/run.log#L2"]["version"], 1)
+        self.assertNotIn("error", refs["trace:run.log#L51"])
+
+    def test_only_links_keep_the_trace_scheme(self):
+        out = sanitize('<a href="trace:run.log#L2">x</a><img src="trace:run.log"><a href="javascript:alert(1)">y</a>')
+        self.assertIn('href="trace:run.log#L2"', out)
+        self.assertNotIn('src="trace:', out)
+        self.assertNotIn("javascript", out)
+
+    def test_publish_and_check_warn_about_citations_that_do_not_resolve(self):
+        fake_claude_session(self.tmp / "claude", self.tmp)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "claude")}):
+            code, out, err = run_err("--store", str(self.store.root), "publish", "p/r", str(self.draft),
+                                     "--trace", str(self.log), "--link-session", SID)
+        self.assertEqual(code, 0, err)
+        self.assertIn("citation trace:run.log#L900", err)
+        self.assertIn("cite as trace:run.log#L<first>-L<last>", out)
+        code, out = run("--store", str(self.store.root), "check")
+        self.assertIn("trace citation trace:nope.txt#L1", out)
+
+    def test_trace_show(self):
+        self.publish(traces=[self.log])
+        code, out = run("--store", str(self.store.root), "trace", "show", "p/r", "trace:run.log#L3-L4", "-C", "1")
+        self.assertEqual(code, 0, out)
+        self.assertIn(">3 │ line 3: step 3", out)
+        self.assertIn(" 5 │ line 5: step 5", out)
+        code, out = run("--store", str(self.store.root), "trace", "show", "p/r")
+        self.assertIn("trace:run.log  v1", out)
+        code, out, err = run_err("--store", str(self.store.root), "trace", "show", "p/r", "trace:other.log#L1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("it has: run.log", err)
+
+    def test_ask_sees_what_the_module_cites_and_what_the_reviewer_points_at(self):
+        from agentledger.ask import build_prompt
+        self.publish(traces=[self.log])
+        row = self.store.add_comment("p/r", "compare with trace:run.log#L3-L5.", module="results", quote="It took 4721 us", author="dan")
+        prompt, _ = build_prompt(self.store, row["id"])
+        self.assertIn('- "4721 us" → trace:run.log#L51 = ', prompt)
+        self.assertIn(".cache/projects/p/r/v001/traces/run.log, line 51 (v1)", prompt)
+        self.assertIn("the trace has 51 lines", prompt)                        # the citation past the end says so
+        self.assertIn("Trace lines the reviewer points at:\n- trace:run.log#L3-L5 = ", prompt)
+        self.assertIn("cite it as trace:run.log", prompt)
+
+    def test_text_references(self):
+        from agentledger import tracerefs
+        refs = tracerefs.find("see trace:run.log#L12-L14, and trace:v2/logs/a.txt. Also trace:x.log#L3")
+        self.assertEqual([r.text() for r in refs], ["trace:run.log#L12-L14", "trace:v2/logs/a.txt", "trace:x.log#L3"])
+        self.assertIsNone(tracerefs.parse("trace:../etc/passwd#L1"))
+        self.assertIsNone(tracerefs.parse("trace:a.log#L5-L2"))
+
+    def test_shared_transcript_keeps_its_line_numbers(self):
+        """A raw transcript is trimmed when shared, but a citation's line still points at the same record."""
+        from agentledger import share
+        raw = self.tmp / "session.jsonl"
+        rows = [{"type": "session-owner", "accountUuid": "acct-1", "sessionId": SID},
+                {"type": "user", "isMeta": True, "sessionId": SID, "message": {"role": "user", "content": "MEMORY"}},
+                {"type": "assistant", "sessionId": SID, "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "measured 4721 us on run 7"}]}}]
+        raw.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        draft = self.tmp / "s.md"
+        draft.write_text("# S\n\n## Results {#results}\n\n[4721 us](trace:session.jsonl#L3)\n")
+        self.publish(draft, traces=[raw])
+        bundle = self.tmp / "s.agentledger.zip"
+        share.pack(self.store, "p/r", bundle)
+        reader, _ = share.unpack(bundle, self.tmp / "reader")
+        page = (reader.root / "projects/p/r/v001/index.html").read_text()
+        entry = next(iter(page_data(page)["traces"]["refs"].values()))
+        hit = [t for n, t in entry["lines"] if n == 3][0]
+        self.assertIn("measured 4721 us on run 7", hit)
+        self.assertNotIn("acct-1", json.dumps(entry))
+        self.assertNotIn("MEMORY", json.dumps(entry))
+
+
 class HtmlReportTests(unittest.TestCase):
     """HTML reports keep their own CSS and title; the viewer's reading typography is for Markdown only."""
 

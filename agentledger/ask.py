@@ -23,6 +23,7 @@ a fresh run answers from the traces instead.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -38,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import comments as cm
+from . import tracebatch, tracerefs
 from . import sandbox
 from .build import build
 from .store import LedgerError, Store, now_iso, read_json, source_line, write_json
@@ -253,6 +255,50 @@ def tool_guidance(kind: str, scratch: Optional[Path]) -> list[str]:
                     " can repeat it."]
 
 
+def _ref_line(store: Store, report, v, ref: "tracerefs.Ref", label: str = "") -> str:
+    """One citation for the prompt: what it is, and the unpacked file and lines the agent can read."""
+    head = f'- "{label}" → {ref.text()}' if label else f"- {ref.text()}"
+    found = tracerefs.resolve(report, v, ref)
+    if not found:
+        try:
+            hit = tracebatch.resolve(report, v, ref.name, ref.version)
+        except tracebatch.BatchError as exc:
+            return f"{head}: {exc}"
+        if not hit:
+            return f"{head}: does not resolve (no trace by that name)"
+        cached = hit.cache_path(store.root)
+        where = f"trace store {hit.describe()}"
+        if cached.is_file():
+            return f"{head} = {cached}" + (f", {ref.lines()}" if ref.start else "") + f" ({where}; a verified copy)"
+        return (f"{head}: in the {where}, not fetched on this machine (the reviewer can run "
+                f"`agentledger trace get {report.id} '{ref.text()}'`)")
+    x, t, stored = found
+    try:
+        path = unpacked(store.root, x.path, t)
+    except OSError:
+        return f"{head}: the trace file is missing"
+    bad = tracerefs.excerpt(stored, ref, context=0, max_lines=1).get("error") if ref.start else None
+    return f"{head} = {path}" + (f", {ref.lines()}" if ref.start else "") + f" (v{x.number})" + (f"; but {bad}" if bad else "")
+
+
+def module_citations(store: Store, report, v, module_id: str, limit: int = 40) -> list[str]:
+    """The trace citations in one module of version ``v``, as prompt lines."""
+    from .build import render_version
+
+    mod = next((m for m in render_version(v).modules if m.id == module_id), None)
+    if mod is None:
+        return []
+    out = []
+    for m in re.finditer(r"""<a\s[^>]*href=(["'])trace:(.*?)\1[^>]*>(.*?)</a>""", mod.html, re.S):
+        ref = tracerefs.parse(html.unescape(m.group(2)))
+        label = html.unescape(re.sub(r"<[^>]+>", "", m.group(3))).strip()
+        if ref:
+            out.append(_ref_line(store, report, v, ref, label[:120]))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = False, kind: str = "claude",
                  scratch: Optional[Path] = None) -> tuple[str, Path]:
     """Return (prompt, working directory) for answering thread ``cid``.
@@ -290,14 +336,20 @@ def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = Fa
     for x in report.versions:
         for t in x.meta.get("traces", []):
             try:
-                traces.append((x.number, unpacked(store.root, x.path, t), t.get("bytes", 0)))
+                traces.append((x.number, unpacked(store.root, x.path, t), t.get("bytes", 0), tracerefs.trace_name(t)))
             except OSError:
                 continue
     if traces:
         lines += ["", "Traces of the work behind the report (transcripts and logs; search them with Grep rather than reading them whole):"]
-        lines += [f"- {p}  (v{n}, {human_size(b)})" for n, p, b in traces]
+        lines += [f"- {p}  (v{n}, {human_size(b)}; cite it as trace:{name})" for n, p, b, name in traces]
     if root["module"]:
         lines.append(f"\nModule: `{root['module']}`")
+        cited = module_citations(store, report, v, root["module"])
+        if cited:
+            lines += ["", "Trace lines this module cites (the claim, then where its evidence is):"] + cited
+    pointed = [r for m in [root, *replies] if m.get("role") != "agent" for r in tracerefs.find(f"{m.get('quote', '')} {m['body']}")]
+    if pointed:
+        lines += ["", "Trace lines the reviewer points at:"] + [_ref_line(store, report, v, r) for r in dict.fromkeys(pointed)]
     if root["quote"]:
         lines += ["", "Quoted passage:", *[f"> {ln}" for ln in root["quote"].splitlines()]]
     lines += ["", "Conversation:"]
@@ -307,7 +359,9 @@ def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = Fa
     lines += [
         "",
         "Reply to the last message of the conversation, as the agent that wrote the report.",
-        "- Check the claim against the source, the traces and the repository before answering; cite evidence as path:line.",
+        "- Check the claim against the source, the traces and the repository before answering; cite the source and the"
+        " repository as path:line, and trace lines as trace:<name>#L<first>-L<last> (the name listed above, lines of"
+        " that file), which the reviewer can click to see those lines.",
         *(tool_guidance(kind, scratch) if kind in ("claude", "codex") else []),
         "- If the report is wrong or unsupported, say so plainly and give the corrected statement.",
         "- If the evidence is not there and can't be obtained by running commands, say what is missing instead of guessing.",

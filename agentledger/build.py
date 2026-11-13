@@ -24,6 +24,7 @@ from .modules import Module, split_modules
 from .sanitize import sanitize
 from .store import Project, Report, Store, Version, write_json, write_text
 from .traces import human_size
+from . import tracerefs
 
 ASSETS = Path(__file__).parent / "assets"
 
@@ -208,6 +209,8 @@ class Builder:
     def report_page(self, project: Project, report: Report, v: Version, prev: Optional[Version]) -> str:
         start = v.path
         cur = self.render(v)
+        linker = tracerefs.Linker(self.store, report, v, lambda p: href(p, start))
+        bodies = {m.id: linker.rewrite(m.html) for m in cur.modules}
         states, removed = module_states(cur, self.render(prev) if prev else None)
         rows = self.report_comments(report)
 
@@ -270,6 +273,8 @@ class Builder:
                 for m in cur.modules
             ],
             "removed": removed,
+            "traces": {"refs": linker.refs, "files": self.trace_files(report, v, start, linker),
+                       "batches": self.trace_batches(report, v, linker)},
             "comments": rows,
             "map": project_flat,
             "crumbs": crumbs,
@@ -280,7 +285,7 @@ class Builder:
             "CSS": asset("common.css") + asset("viewer.css"),
             "JS": asset("core.js") + asset("viewer.js"),
             "DATA": script_json(data),
-            "BODY": self.article(project, report, v, cur, states, removed, rows, start),
+            "BODY": self.article(project, report, v, cur, states, removed, rows, start, bodies, linker),
         })
         if cur.html:  # the viewer's reading typography is for Markdown; an HTML report brings its own
             style = f' style="--al-html-width:{cur.width}px"' if cur.width else ""
@@ -288,8 +293,37 @@ class Builder:
                                 f'<article class="al-article al-html" id="al-article"{style}>', 1)
         return page
 
+    def trace_files(self, report: Report, v: Version, start: Path, linker) -> list[dict]:
+        """Every trace a reader of version ``v`` can open: its citation name, file and how often the report cites it."""
+        out = []
+        for x in report.versions:
+            if x.number > v.number:
+                continue
+            for t in x.meta.get("traces", []):
+                path = x.path / t["path"]
+                out.append({"name": tracerefs.trace_name(t), "version": x.number, "href": href(path, start),
+                            "path": self.store.repo_path(path), "bytes": t.get("bytes", 0),
+                            "cited": linker.cited.get(str(path), 0)})
+        return out
+
+    def trace_batches(self, report: Report, v: Version, linker) -> list[dict]:
+        """The trace-store batches a reader of version ``v`` can cite from: raw traces kept outside the store."""
+        seen, out = set(), []
+        for x in reversed(report.versions):
+            if x.number > v.number:
+                continue
+            for b in x.meta.get("trace_batches", []):
+                if b.get("tag") in seen:
+                    continue
+                seen.add(b.get("tag"))
+                out.append({"repo": b.get("repo"), "tag": b.get("tag"), "release_url": b.get("release_url"),
+                            "runs": b.get("runs", 0), "version": x.number,
+                            "cited": linker.batch_cited.get(b.get("tag"), 0) if linker else 0})
+        return out
+
     def article(self, project: Project, report: Report, v: Version, cur: Rendered, states: dict,
-                removed: list[dict], rows: list[dict], start: Path) -> str:
+                removed: list[dict], rows: list[dict], start: Path, bodies: Optional[dict] = None,
+                linker=None) -> str:
         meta = v.meta
         dash = href(self.store.root / "index.html", start)
         kicker = f'<a href="{esc(dash)}#project={esc(project.id)}">{esc(project.title)}</a>'
@@ -344,7 +378,7 @@ class Builder:
                 attrs += f' data-state="{states[m.id]}"'
             if m.attrs.get("status"):
                 attrs += f' data-status="{esc(m.attrs["status"])}"'
-            parts.append(f'<section class="al-module"{attrs}>\n{m.html}\n</section>')
+            parts.append(f'<section class="al-module"{attrs}>\n{(bodies or {}).get(m.id, m.html)}\n</section>')
 
         foot = ['<footer class="al-doc-foot">']
         if report.children:
@@ -372,8 +406,20 @@ class Builder:
             foot.append('<div class="al-foot-block"><div class="al-foot-h">Traces</div><ul class="al-traces">')
             for x, t in traces:
                 name = t["path"].split("/", 1)[-1]
+                n = linker.cited.get(str(x.path / t["path"]), 0) if linker else 0
+                cites = f' · cited {n}×' if n else ""
                 foot.append(f'<li><a href="{esc(href(x.path / t["path"], start))}" download>{esc(name)}</a> '
-                            f'<span class="al-muted">v{x.number} · {human_size(t.get("bytes", 0))}</span></li>')
+                            f'<code class="al-tname" title="cite it as">trace:{esc(tracerefs.trace_name(t))}</code> '
+                            f'<span class="al-muted">v{x.number} · {human_size(t.get("bytes", 0))}{cites}</span></li>')
+            foot.append("</ul></div>")
+        batches = self.trace_batches(report, v, linker)
+        if batches:
+            foot.append('<div class="al-foot-block"><div class="al-foot-h">Trace-store batches</div><ul class="al-traces">')
+            for b in batches:
+                cites = f' · cited {b["cited"]}×' if b["cited"] else ""
+                foot.append(f'<li><a href="{esc(b["release_url"] or "#")}" rel="noopener noreferrer">{esc(b["tag"])}</a> '
+                            f'<span class="al-muted">{esc(b["repo"])} · {b["runs"]} run{"s" if b["runs"] != 1 else ""} · '
+                            f'v{b["version"]}{cites}</span></li>')
             foot.append("</ul></div>")
         foot.append(f'<div class="al-foot-src">Source: <code>{esc(self.store.repo_path(v.source))}</code> · '
                     f'comments: <code>{esc(self.store.repo_path(v.comments_path))}</code></div>')

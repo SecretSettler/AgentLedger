@@ -104,7 +104,8 @@ class Cleaner:
         """Clean text file ``src`` into ``dest``; return what was replaced, and whether ``dest`` differs from it."""
         kind = _session_kind(src)
         if kind:
-            counts = redact.sanitize_session(src, dest, kind, self.secrets)
+            # keep_lines: citations (trace:<file>#L12) point at line numbers, which must survive the trimming
+            counts = redact.sanitize_session(src, dest, kind, self.secrets, keep_lines=True)
             dropped = {k: n for k, n in counts.items() if k.startswith("dropped") and n}
             if dropped:  # a raw transcript; a copy `trace prepare` made already holds only the conversation
                 self.sessions += 1

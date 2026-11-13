@@ -494,3 +494,25 @@ body.al-panel-open .al-pad { right: calc(var(--al-panel-w) + 20px); }
   .al-module.is-collapsed > * { display: revert !important; }
   mark.al-hl { background: none; border: 0; }
 }
+
+/* Trace citations */
+.al-article a[data-tref] { color: var(--al-accent); text-decoration: underline dotted 1.5px; text-underline-offset: 3px; cursor: pointer; }
+.al-article a[data-tref]::after { content: "\2261"; font: 600 0.72em var(--al-sans); vertical-align: super; margin-left: 1px; opacity: .75; }
+.al-article a[data-tref-error] { color: var(--al-removed); text-decoration-style: wavy; }
+.al-tref-live, code.al-tname { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.al-modal.al-modal-wide { width: min(920px, 94vw); }
+.al-trace-where { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-bottom: 8px; font-size: 12.5px; }
+.al-trace-where code { font-family: var(--al-mono); font-size: 12px; }
+.al-trace-lines { max-height: 52vh; overflow: auto; border: 1px solid var(--al-line); border-radius: 8px; padding: 6px 0;
+  font-family: var(--al-mono); font-size: 12px; line-height: 1.5; background: var(--al-bg); }
+.al-tl { display: grid; grid-template-columns: minmax(3ch, auto) 1fr; gap: 12px; padding: 0 12px; }
+.al-tl-n { color: var(--al-muted); text-align: right; user-select: none; }
+.al-tl-t { white-space: pre-wrap; overflow-wrap: anywhere; }
+.al-tl.is-hit { background: var(--al-hl); }
+.al-tl.is-hit .al-tl-n { color: var(--al-ink); font-weight: 600; }
+.al-trace-note { margin: 8px 0 0 !important; font-size: 12.5px !important; }
+.al-trace-error { color: var(--al-removed) !important; }
+.al-trace-dl { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.al-trace-dl svg { width: 14px; height: 14px; }
+.al-trace-batch { font-size: 12.5px; color: var(--al-ink-2); margin: -2px 0 8px; overflow-wrap: anywhere; }
+.al-trace-note code { font-family: var(--al-mono); font-size: 11.5px; overflow-wrap: anywhere; }

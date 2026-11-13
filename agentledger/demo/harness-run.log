@@ -1,0 +1,25 @@
+# harness run log (sample data for `agentledger demo`; the numbers are made up)
+# host: Xeon E5-2660 v3, 40 threads | gcc 13.3 -O2 -static -nostdlib | guest: KVM, 1 vCPU, 256 MB
+[00:00:02] task scheduling: start
+[00:03:41] task scheduling: call 7/7 compile ok (28.9 KB C), run 1.90 s guest, verifier PASS
+[00:03:41] task scheduling: out_tokens=61204 calls=7
+[00:03:42] task log-summary: start
+[00:07:10] task log-summary: call 4/4 compile ok (9.1 KB C), run 0.27 ms guest, verifier PASS
+[00:07:10] task log-summary: out_tokens=18551 calls=4
+[00:07:11] task dna-primer: start
+[00:13:52] task dna-primer: call 6/6 compile ok (17.4 KB C), run 0.41 s guest, verifier PASS
+[00:13:52] task dna-primer: out_tokens=33902 calls=6
+[00:13:53] task bayes-python: start
+[00:21:30] task bayes-python: call 6/6 compile ok (21.0 KB C), run 0.88 s guest, verifier PASS
+[00:21:30] task bayes-python: out_tokens=41377 calls=6
+[00:21:31] task bayes-r: start
+[00:28:02] task bayes-r: call 5/5 compile ok (20.2 KB C), run 0.86 s guest, verifier PASS
+[00:28:02] task bayes-r: out_tokens=39560 calls=5
+[00:28:03] task checkpoint-diagnosis: start
+[00:41:07] task checkpoint-diagnosis: call 4/4 compile ok (6.3 KB C), run 12.4 ms guest, verifier PASS
+[00:41:07] task checkpoint-diagnosis: out_tokens=15578 calls=4
+[00:41:07] summary: 6/6 verifiers PASS on first finish
+[00:41:07] summary: calls=32 out_tokens=210172 wall=41m05s
+[00:41:07] summary: compile time 47.9 s of 2465 s wall (1.9%)
+[00:41:08] tokens: re-emitted C source 161862, other output 48310
+[00:41:08] tokens: recorded agents (re-tokenized, paper logs) out_tokens=177399
