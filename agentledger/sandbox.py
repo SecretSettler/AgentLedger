@@ -49,9 +49,12 @@ SECRET_PATHS = (
     ".claude", ".claude.json", ".claude.json.backup",
     ".codex/auth.json", ".codex/sessions", ".codex/archived_sessions", ".codex/history.jsonl", ".codex/log",
     ".codex/shell_snapshots", ".codex/memories", ".codex/*.sqlite", ".codex/*.sqlite-wal", ".codex/*.sqlite-shm",
+    ".pi/agent/auth.json", ".pi/agent/mcp.json", ".pi/agent/models.json", ".pi/agent/sessions",
+    ".gemini/oauth_creds.json", ".gemini/google_accounts.json", ".gemini/mcp_config.json",
+    ".gemini/antigravity", ".gemini/antigravity-cli", ".gemini/jetski",
 )
 # Folders an agent creates on its first run; made up front (when the agent is installed) so they are denied from it.
-CREATE_FIRST = (".codex/sessions",)
+CREATE_FIRST = (".codex/sessions", ".pi/agent/sessions")
 # Container and session sockets: connecting to the Docker socket is as good as root.
 SOCKETS = ("/run/docker.sock", "/var/run/docker.sock", "/run/containerd", "/run/podman", "/run/user/{uid}")
 ENV_FILES = (".env", ".env.*", "*/.env", "*/.env.*")
@@ -147,12 +150,15 @@ def secret_paths(roots: list[Path]) -> list[Path]:
     """Existing secret files and folders (resolved, so symlinked paths are denied where they really are)."""
     home = Path.home()
     uid = str(os.getuid()) if hasattr(os, "getuid") else ""
-    # The agents' state lives in CLAUDE_CONFIG_DIR / CODEX_HOME when those are set, not under ~/.claude / ~/.codex.
-    bases = {".claude": [home / ".claude"], ".codex": [home / ".codex"]}
+    # The agents' state lives in their configured home folders when env overrides are set.
+    bases = {".claude": [home / ".claude"], ".codex": [home / ".codex"], ".gemini": [home / ".gemini"]}
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         bases[".claude"].append(Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser())
     if os.environ.get("CODEX_HOME"):
         bases[".codex"].append(Path(os.environ["CODEX_HOME"]).expanduser())
+    for env in ("ANTIGRAVITY_HOME", "GEMINI_CLI_HOME"):
+        if os.environ.get(env):
+            bases[".gemini"].append(Path(os.environ[env]).expanduser())
 
     def places(rel: str) -> list[Path]:
         head, _, rest = rel.partition("/")
@@ -171,6 +177,16 @@ def secret_paths(roots: list[Path]) -> list[Path]:
     for rel in SECRET_PATHS:
         for p in places(rel):
             found += sorted(p.parent.glob(p.name)) if "*" in p.name else [p]
+    if os.environ.get("PI_CODING_AGENT_DIR"):
+        pi_cfg = Path(os.environ["PI_CODING_AGENT_DIR"]).expanduser()
+        if pi_cfg.is_dir():
+            try:
+                (pi_cfg / "sessions").mkdir(mode=0o700, exist_ok=True)
+            except OSError:
+                pass
+        found += [pi_cfg / n for n in ("auth.json", "mcp.json", "models.json", "sessions")]
+    if os.environ.get("PI_CODING_AGENT_SESSION_DIR"):
+        found.append(Path(os.environ["PI_CODING_AGENT_SESSION_DIR"]).expanduser())
     found += [Path(s.format(uid=uid)) for s in SOCKETS]
     for root in roots:
         for pattern in ENV_FILES:

@@ -21,6 +21,8 @@
   <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-1d7f55">
   <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-1f1e1b">
   <img alt="Codex skill" src="https://img.shields.io/badge/Codex-skill-1f1e1b">
+  <img alt="Pi skill" src="https://img.shields.io/badge/Pi-skill-1f1e1b">
+  <img alt="Antigravity skill" src="https://img.shields.io/badge/Antigravity-skill-1f1e1b">
   <img alt="License Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-77736a">
 </p>
 
@@ -44,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/SecretSettler/AgentLedger/main/inst
 ```
 
 That installs the CLI, creates a private store at `~/agentledger-store` (or links yours: `... | sh -s -- ~/my-store-clone`)
-and installs the skill for **Claude Code** and **Codex**. Then, in any repository, just ask your agent:
+and installs the skill for **Claude Code**, **Codex**, **Pi** and **Antigravity**. Then, in any repository, just ask your agent:
 
 > write this up as a report
 
@@ -65,7 +67,7 @@ Want to look around first? `agentledger demo` builds a sample store and opens it
 
 ### 1. Let your agent do it
 
-Paste this into Claude Code or Codex:
+Paste this into Claude Code, Codex, Pi or Antigravity:
 
 > Install AgentLedger from https://github.com/SecretSettler/AgentLedger: run
 > `curl -fsSL https://raw.githubusercontent.com/SecretSettler/AgentLedger/main/install.sh | sh`
@@ -83,16 +85,19 @@ On Claude Code 2.1.275 or later, one step does both: `/plugin install agentledge
 The plugin adds the skill plus `/agentledger:report`, `/agentledger:review`, `/agentledger:share` and `/agentledger:open`; on first use the
 skill offers to install the CLI.
 
-### 3. Codex
+### 3. Codex, Pi and Antigravity
 
-`install.sh` (or `agentledger setup`) places the skill in `~/.agents/skills/agentledger/`, where Codex picks it up.
-Older Codex versions read `~/.codex/skills/`; copy [`skills/agentledger`](skills/agentledger) there.
+`install.sh` (or `agentledger setup`) installs the skill for every supported harness by default (pass `--agent claude|codex|pi|antigravity` to target specific ones):
+
+- **Codex:** `~/.agents/skills/agentledger/` (older Codex versions read `~/.codex/skills/`; copy [`skills/agentledger`](skills/agentledger) there).
+- **Pi:** `$PI_CODING_AGENT_DIR/skills/agentledger/` when `PI_CODING_AGENT_DIR` is set, else `~/.pi/agent/skills/agentledger/`.
+- **Antigravity:** `$ANTIGRAVITY_HOME/config/skills/agentledger/` (or `$GEMINI_CLI_HOME/config/skills/agentledger/`), else `~/.gemini/config/skills/agentledger/`.
 
 ### 4. By hand
 
 ```sh
 pipx install git+https://github.com/SecretSettler/AgentLedger    # or: pip install --user ...
-agentledger setup [path-to-your-store-clone]                      # creates ~/agentledger-store if you have none
+agentledger setup [path-to-your-store-clone] [--agent ...]        # creates ~/agentledger-store if you have none
 ```
 
 **Keep the store private.** It holds your reports and the transcripts behind them. A new one is a local git repo; give
@@ -111,8 +116,9 @@ it a private remote, e.g. `gh repo create my-agent-ledger --private --source ~/a
 3. **Comment.** Select any text and press **Comment**. Comments are saved into the version's `comments.csv`, through
    the local server, the GitHub API, or an exported CSV.
 4. **Ask.** Select text and press **Ask**. Your question, the quote and the thread become the prompt. The session that
-   wrote the report answers: Claude Code resumes a fork of it (`--resume --fork-session`, so your original
-   session is untouched), Codex resumes it in place (`codex exec resume`). That happens once per version: every later
+   wrote the report answers: Claude Code and Pi resume a fork of it (`claude --resume --fork-session`, `pi --fork`, so
+   your original session is untouched), while Codex and Antigravity resume it in place (`codex exec resume`,
+   `agy --conversation`). That happens once per version: every later
    question on the version, in any thread, continues the same review session, so the agent remembers the review so far.
    Without the session, the first question starts the review session as a fresh run that answers from the trace. The
    agent reads first and runs programs only to compute what is not written down (see [Asking](#asking)).
@@ -191,15 +197,16 @@ The skill tells the agent all of this; it's here for when you write one yourself
 - Evidence next to every claim. Images and data: `--asset <path>`; they carry over to later versions.
 - Sub-reports: publish to a longer id, `agentledger publish repo/topic/part part.md --link-session auto`.
 - Sessions: `--link-session auto|PATH|ID` (required) links the session that wrote the report, so Ask on this machine
-  continues it. `auto` is the session running the command (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`), else the
+  continues it. `auto` is the session running the command (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
+  `PI_SESSION_FILE` / `PI_SESSION_ID`, `ANTIGRAVITY_CONVERSATION_ID`), else the
   most recently active one for the directory (never one of Ask's own); publish prints which. Only the id is recorded.
 - Traces are what a version shares with everyone who can read the store. `--trace auto` shares the linked session as
   a reviewed copy: `agentledger trace prepare <id> --link-session auto` keeps only the conversation (no system text,
   attached files, reasoning or account ids) and redacts secrets (values from `.env` files and credential-named
   environment variables, and common key formats), the agent reviews and edits the copy (or, from the command line,
-  `agentledger trace review <id> --agent claude|codex` has Claude Code or Codex do it in its sandbox, able to change
-  only the copy), `agentledger trace approve <id>` checks it again and records it, and publish refuses a copy that is
-  missing, unapproved or changed since.
+  `agentledger trace review <id> --agent claude|codex|pi|antigravity` has Claude Code or Codex edit it in its sandbox
+  or Pi / Antigravity list what to change), `agentledger trace approve <id>` checks it again and records it, and publish
+  refuses a copy that is missing, unapproved or changed since.
   `--trace <path>` attaches any log or folder as it is.
 - HTML reports keep their own CSS (from `<head>` too) and their own `<h1>`, in a 980px column
   (`<meta name="agentledger:width" content="1100">` sets another); the reading typography is for Markdown only. Scope
@@ -208,14 +215,15 @@ The skill tells the agent all of this; it's here for when you write one yourself
 
 ### Asking
 
-- `agentledger open` (or `serve`) enables Ask when `claude` or `codex` is installed. The report's own session is used
-  when its transcript is on this machine; otherwise `--ask claude|codex` picks the agent, and `--ask-cmd "<cmd>"` plugs
+- `agentledger open` (or `serve`) enables Ask when `claude`, `codex`, `pi` or `agy` (Antigravity) is installed. The report's own session is used
+  when its transcript is on this machine; otherwise `--ask claude|codex|pi|antigravity` picks the agent, and `--ask-cmd "<cmd>"` plugs
   in anything that reads a prompt on stdin and prints an answer.
 - From the terminal: `agentledger ask <comment-id>`. `--print-prompt` shows exactly what the agent receives.
 - **Read first, compute when needed.** The agent answers from the report, its traces and the repository with Read, Grep
-  and Glob (Codex: `rg`, `sed`, `cat`). It runs programs only when searching cannot settle the question or the answer
+  and Glob (Pi: `read`, `grep`, `find`, `ls`; Codex / Antigravity: read-only inspection). It runs programs only when searching cannot settle the question or the answer
   is a derived value (a count, a sum, a script re-run on the data), and then lists the commands and their output.
-- **The sandbox.** Programs run in the agent's own sandbox: Claude Code's Bash sandbox or a Codex permissions profile.
+- **The sandbox.** Programs run in the agent's own sandbox: Claude Code's Bash sandbox or a Codex permissions profile
+  (Pi runs offline with read-only tools only; Antigravity runs with `--sandbox` in read-only mode).
   The agent can read the whole machine except confidential files and write only to a per-version scratch folder under
   the temp directory; every other tool stays off. When the sandbox cannot start, cannot be verified or would be
   widened, Ask only reads, and confidential files stay unreadable. `serve --ask-read-only`, `ask --read-only` or
@@ -223,8 +231,8 @@ The skill tells the agent all of this; it's here for when you write one yourself
 - **Follow-ups.** Ask again in the same thread as often as you like. Every question sends the whole thread, earlier
   answers included, and continues the version's review session, so the agent keeps the context of the conversation.
 - Answers are saved as agent replies in `comments.csv`, so they are versioned with the report.
-- Each version's review session is named `AgentLedger: <report> v<N>` and shows up in `claude --resume` and the IDE's
-  session history, so you can open the conversation behind the answers. Questions on one version run one at a time.
+- Each version's review session is named `AgentLedger: <report> v<N>` and shows up in `claude --resume`, Pi's session
+  picker and the IDE's session history, so you can open the conversation behind the answers. Questions on one version run one at a time.
   (Claude Code lists no `claude -p` session by default; Ask records the entrypoint `agentledger-ask` instead.
   `AGENTLEDGER_ASK_ENTRYPOINT=sdk-cli` hides them again.)
 
@@ -251,7 +259,7 @@ reads, and runs programs only inside its sandbox (see [Asking](#asking)).
 redaction as `trace prepare`: the values of secrets known on your machine (`.env` files near the store, the checkouts
 and sessions behind the report, credential-named environment variables) and common key formats (API keys, GitHub and
 cloud tokens, private keys, JWTs, passwords in URLs, `api_key=…` assignments) become `[REDACTED:<name>]`, your home
-directory becomes `~`, and a raw Claude Code or Codex transcript is cut down to the conversation. Then the whole
+directory becomes `~`, and a raw Claude Code, Codex, Pi or Antigravity transcript is cut down to the conversation. Then the whole
 bundle, built pages included, is scanned again and nothing is written if anything is left; a binary file that holds a
 credential stops the share. Only the bundle changes, never your store, and `share` lists what it redacted, per file.
 Traces still show the work itself (commands, file contents the agent read), so send them to people you trust.
@@ -302,11 +310,11 @@ them return to the page; unrelated private threads stay private. Agents review t
 | Command | |
 |---|---|
 | `agentledger` | Where your store is, what is waiting on you, what to run next |
-| `setup [path]` | One-time setup: link or create the store; install the skill for Claude Code and Codex |
+| `setup [path] [--agent …]` | One-time setup: link or create the store; install the skill for Claude Code, Codex, Pi and Antigravity |
 | `open [report-id \| file.agentledger.zip]` | Serve on this machine and open the dashboard, a report, or a shared report (`--share`, `--ask`, `--port`, `--into`) |
-| `demo` | Build a sample store and open it (`--ask claude` to try a real agent) |
+| `demo` | Build a sample store and open it (`--ask claude\|codex\|pi\|antigravity` to try a real agent) |
 | `publish <id> <file\|folder>` | New report or new version (`--link-session auto\|PATH\|ID` required; `--trace auto\|PATH --summary --about --changes --resolves --asset --tag`) |
-| `trace prepare <id> --link-session …` / `review <id>` / `approve <id>` | Write the redacted copy of a session that `publish --trace auto` shares, have an agent review it (`--agent claude\|codex`), and approve it |
+| `trace prepare <id> --link-session …` / `review <id>` / `approve <id>` | Write the redacted copy of a session that `publish --trace auto` shares, have an agent review it (`--agent claude\|codex\|pi\|antigravity`), and approve it |
 | `trace check <file>…` | Look for secrets and credentials in files (exit 1 if any) |
 | `sync [-m msg]` | Pull, rebuild, commit and push the store |
 | `ask <comment-id>` | Have the agent answer a thread (`--backend`, `--cmd`, `--print-prompt`) |
