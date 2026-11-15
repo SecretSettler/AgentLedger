@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 
 from agentledger import comments as cm
-from agentledger.ask import ClaudeStream, resolve_backend
+from agentledger.ask import AntigravityStream, ClaudeStream, PiStream, resolve_backend
 from agentledger.build import build, render_version
 from agentledger.cli import main
 from agentledger.markdown import render
@@ -59,6 +59,48 @@ def fake_claude_session(config_dir: Path, cwd: Path, sid: str = SID, lines=(), e
     t.write_text("\n".join(json.dumps(x) for x in [head, *lines]) + "\n", encoding="utf-8")
     if age:
         os.utime(t, (time.time() - age, time.time() - age))
+    return t
+
+
+def fake_pi_session(agent_dir: Path, cwd: Path, sid: str = SID, lines=(), name: str = "", age: float = 0) -> Path:
+    """A Pi transcript for ``cwd`` under ``agent_dir/sessions`` (version 3 JSONL header)."""
+    slug = "--" + re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve())).strip("-") + "--"
+    proj = agent_dir / "sessions" / slug
+    proj.mkdir(parents=True, exist_ok=True)
+    t = proj / f"2026-11-14T00-00-00-000Z_{sid}.jsonl"
+    rows = [{"type": "session", "version": 3, "id": sid, "timestamp": "2026-11-14T00:00:00Z", "cwd": str(cwd)}]
+    if name:
+        rows.append({"type": "session_info", "id": "info1", "name": name})
+    rows.extend(lines or [{"type": "message", "id": "m1", "message": {"role": "user", "content": "start"}}])
+    t.write_text("\n".join(json.dumps(x) for x in rows) + "\n", encoding="utf-8")
+    if age:
+        os.utime(t, (time.time() - age, time.time() - age))
+    return t
+
+
+def fake_antigravity_session(ag_home: Path, cwd: Path, cid: str = SID, lines=(), full_lines=None,
+                             brain_sub: str = "antigravity-cli/brain", user_text: str = "start",
+                             age: float = 0) -> Path:
+    """An Antigravity brain transcript under ``ag_home/<brain_sub>/<cid>/.system_generated/logs``."""
+    logs = ag_home / brain_sub / cid / ".system_generated" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    base = [
+        {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+         "content": f"<USER_REQUEST>{user_text}</USER_REQUEST>"},
+        {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Checking.",
+         "tool_calls": [{"name": "run_command", "args": {"Cwd": str(cwd), "CommandLine": "ls"}}]},
+        *lines,
+    ]
+    t = logs / "transcript.jsonl"
+    t.write_text("\n".join(json.dumps(x) for x in base) + "\n", encoding="utf-8")
+    if age:
+        os.utime(t, (time.time() - age, time.time() - age))
+    if full_lines is not None:
+        full = logs / "transcript_full.jsonl"
+        full.write_text("\n".join(json.dumps(x) for x in [*base, *full_lines]) + "\n", encoding="utf-8")
+        if age:
+            os.utime(full, (time.time() - age, time.time() - age))
+        return full
     return t
 
 
@@ -252,16 +294,22 @@ class TraceLinkTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.claude = self.tmp / "claude"
+        self.pi = self.tmp / "pi"
+        self.ag = self.tmp / "antigravity"
         self.work = self.tmp / "work"
         self.work.mkdir()
         (self.work / ".env").write_text(f"MY_API_KEY={self.SECRET}\nDEBUG=1\n")
         self.store = Store(init_store(self.tmp / "store", name="T"))
         self.draft = self.tmp / "r.md"
         self.draft.write_text("# R\n\n## One {#one}\n\nx\n")
-        self.env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude), "CODEX_HOME": str(self.tmp / "codex"),
-                                                "DEMO_TOKEN": self.ENV_SECRET})
+        self.env = mock.patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(self.claude), "CODEX_HOME": str(self.tmp / "codex"),
+            "PI_CODING_AGENT_DIR": str(self.pi), "ANTIGRAVITY_HOME": str(self.ag),
+            "DEMO_TOKEN": self.ENV_SECRET,
+        })
         self.env.start()
-        for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+        for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PI_SESSION_FILE", "PI_SESSION_ID",
+                  "PI_CODING_AGENT_SESSION_DIR", "ANTIGRAVITY_CONVERSATION_ID", "GEMINI_CLI_HOME"):
             os.environ.pop(k, None)
         self.cwd = os.getcwd()
         os.chdir(self.work)
@@ -331,18 +379,74 @@ class TraceLinkTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.store.report("p/r").latest.meta["session"], {"agent": "codex", "id": tid})
 
+    def test_auto_links_pi_and_antigravity_sessions(self):
+        pi_sid = "11111111-aaaa-bbbb-cccc-222222222222"
+        pi_ask = "33333333-aaaa-bbbb-cccc-444444444444"
+        pi_file = fake_pi_session(self.pi, self.work, sid=pi_sid, age=120)
+        fake_pi_session(self.pi, self.work, sid=pi_ask, name="AgentLedger: p/r v1")   # Ask's own fork: skipped
+        # 1. mtime fallback picks the author Pi session and skips Ask's own fork
+        code, out, err = self.publish("--link-session", "auto")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store.report("p/r").latest.meta["session"], {"agent": "pi", "id": pi_sid})
+        # 2. PI_SESSION_ID and PI_SESSION_FILE env vars, plus direct ID / path
+        with mock.patch.dict(os.environ, {"PI_SESSION_ID": pi_sid}):
+            code, out, err = self.publish("--link-session", "auto")
+            self.assertEqual(code, 0, err)
+            self.assertIn("PI_SESSION_ID", err)
+        with mock.patch.dict(os.environ, {"PI_SESSION_FILE": str(pi_file)}):
+            code, out, err = self.publish("--link-session", "auto")
+            self.assertEqual(code, 0, err)
+            self.assertIn("PI_SESSION_FILE", err)
+        self.assertEqual(self.publish("--link-session", pi_sid)[0], 0)
+        self.assertEqual(self.publish("--link-session", str(pi_file))[0], 0)
+        shutil.rmtree(self.pi)
+
+        # 3. Antigravity: nested remote conversation ID under jetski/brain + transcript_full.jsonl preference
+        ag_cid = "v1/default/jetski_remote_agents_3p/55555555-6666-7777-8888-999999999999"
+        ag_ask = "66666666-7777-8888-9999-000000000000"
+        ag_full = fake_antigravity_session(
+            self.ag, self.work, cid=ag_cid, brain_sub="jetski/brain", age=60,
+            full_lines=[{"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+                         "content": f"Full line with {self.SECRET}"}],
+        )
+        fake_antigravity_session(
+            self.ag, self.work, cid=ag_ask,
+            user_text="A reviewer is asking about a passage in a report an agent wrote. Answer from evidence.\n"
+                      "Reply to the last message of the conversation, as the agent that wrote the report.",
+        )
+        code, out, err = self.publish("--link-session", "auto")
+        self.assertEqual(code, 0, err)
+        self.store.invalidate()
+        self.assertEqual(self.store.report("p/r").latest.meta["session"], {"agent": "antigravity", "id": ag_cid})
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_CONVERSATION_ID": ag_cid}):
+            code, out, err = self.publish("--link-session", "auto")
+            self.assertEqual(code, 0, err)
+            self.assertIn("ANTIGRAVITY_CONVERSATION_ID", err)
+        self.assertEqual(self.publish("--link-session", ag_cid)[0], 0)
+        self.assertEqual(self.publish("--link-session", str(ag_full.parent / "transcript.jsonl"))[0], 0)
+        # trace prepare upgrades transcript.jsonl to transcript_full.jsonl and uses the leaf id as filename
+        code, out, err = self.trace("prepare", "p/r", "--link-session", str(ag_full.parent / "transcript.jsonl"))
+        self.assertEqual(code, 0, err)
+        state = load_trace_state(self.store.root, "p/r")
+        self.assertTrue(state["path"].endswith("/session-antigravity-55555555.jsonl"), state["path"])
+        prepared_text = Path(state["path"]).read_text()
+        self.assertIn("Full line with [REDACTED:MY_API_KEY]", prepared_text)
+        self.assertNotIn(self.SECRET, prepared_text)
+
     def test_link_by_path_or_id_and_the_errors(self):
         t = fake_claude_session(self.claude, self.work)
         self.assertEqual(self.publish("--link-session", SID)[0], 0)
         self.assertEqual(self.publish("--link-session", str(t))[0], 0)
         copy = self.tmp / "copy.jsonl"
         shutil.copy(t, copy)
-        for bad in (str(copy), "dddddddd-1111-2222-3333-444444444444"):
+        foreign = self.tmp / "foreign.jsonl"
+        foreign.write_text('{"hello": "world"}\n')
+        for bad in (str(copy), str(foreign), "dddddddd-1111-2222-3333-444444444444"):
             self.assertEqual(self.publish("--link-session", bad)[0], 2, bad)
         shutil.rmtree(self.claude)
         code, out, err = self.publish("--link-session", "auto")
         self.assertEqual(code, 2)
-        self.assertIn("found no Claude Code or Codex session", err)
+        self.assertIn("found no Claude Code, Codex, Pi or Antigravity session", err)
 
     # ---------------------------------------------------------------- the shared copy
     def test_prepare_keeps_the_conversation_and_redacts(self):
@@ -474,11 +578,84 @@ class TraceLinkTests(unittest.TestCase):
             self.assertIn(kept, text, kept)
         self.assertEqual(counts["kept records"], 4)
 
+    def test_pi_sessions_keep_the_conversation_only(self):
+        from agentledger.redact import sanitize_session
+        src, dest, again = self.tmp / "pi.jsonl", self.tmp / "pi-out.jsonl", self.tmp / "pi-again.jsonl"
+        rows = [
+            {"type": "session", "version": 3, "id": SID, "cwd": "/w", "parentSession": "/secret/parent.jsonl"},
+            {"type": "model_change", "provider": "anthropic", "modelId": "claude-sonnet"},
+            {"type": "session_info", "id": "i1", "name": "my session"},
+            {"type": "message", "id": "s0", "message": {"role": "system", "content": "SYSTEM PROMPT TEXT"}},
+            {"type": "message", "id": "u1", "parentId": "s0", "message": {"role": "user", "content": [
+                {"type": "text", "text": "inspect <system-reminder>HIDDEN</system-reminder> metrics"},
+                {"type": "image", "data": "BASE64IMAGE"}]}},
+            {"type": "message", "id": "a1", "parentId": "u1", "message": {
+                "role": "assistant", "usage": {"totalTokens": 99},
+                "content": [
+                    {"type": "thinking", "thinking": "PRIVATE PI REASONING"},
+                    {"type": "text", "text": "Running grep."},
+                    {"type": "toolCall", "id": "tc1", "name": "grep", "arguments": {"pattern": self.GITHUB, "path": "x"}},
+                ]}},
+            {"type": "message", "id": "tr1", "message": {
+                "role": "toolResult", "toolCallId": "tc1", "toolName": "grep", "isError": False,
+                "content": [{"type": "text", "text": f"token={self.ANTHROPIC} ok"}]}},
+            {"type": "message", "id": "b_excl", "message": {
+                "role": "bashExecution", "command": "cat secret", "output": "PRIVATE BASH", "excludeFromContext": True}},
+            {"type": "message", "id": "b_keep", "message": {
+                "role": "bashExecution", "command": "wc -l x", "output": "42 x", "exitCode": 0}},
+            {"type": "compaction", "id": "c1", "summary": "Summarised earlier turns."},
+        ]
+        src.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        counts = sanitize_session(src, dest, "pi", {})
+        text = dest.read_text()
+        for gone in ("parentSession", "model_change", "session_info", "SYSTEM PROMPT", "HIDDEN", "BASE64IMAGE",
+                     "PRIVATE PI REASONING", "totalTokens", "PRIVATE BASH", self.GITHUB, self.ANTHROPIC):
+            self.assertNotIn(gone, text, gone)
+        for kept in ("inspect", "metrics", "Running grep.", '"toolCall"', "[REDACTED:github-token]",
+                     "[REDACTED:anthropic-key]", "42 x", "Summarised earlier turns."):
+            self.assertIn(kept, text, kept)
+        self.assertEqual(counts["kept records"], 6)
+        sanitize_session(dest, again, "pi", {})
+        self.assertEqual(again.read_text(), text)  # idempotent
+
+    def test_antigravity_sessions_keep_the_conversation_only(self):
+        from agentledger.redact import sanitize_session
+        src, dest, again = self.tmp / "ag.jsonl", self.tmp / "ag-out.jsonl", self.tmp / "ag-again.jsonl"
+        rows = [
+            {"step_index": 0, "source": "SYSTEM", "type": "CONVERSATION_HISTORY", "content": "OLD HISTORY"},
+            {"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+             "content": "<ADDITIONAL_METADATA>IDE CURSOR STATE</ADDITIONAL_METADATA>\n"
+                        "<USER_REQUEST>check latency logs</USER_REQUEST>\n"
+                        "<SYSTEM_MESSAGE>BACKGROUND TASK</SYSTEM_MESSAGE>",
+             "media": [{"mime_type": "image/png", "uri": "/secret/screen.png"}]},
+            {"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+             "thinking": "PRIVATE ANTIGRAVITY THINKING",
+             "content": "Inspecting run.log.",
+             "tool_calls": [{"id": "call_1", "name": "run_command",
+                             "args": {"Cwd": "/w", "CommandLine": f"Authorization: Bearer {self.GITHUB}"}}]},
+            {"step_index": 3, "source": "TOOL", "type": "RUN_COMMAND", "status": "DONE",
+             "content": f"key={self.ANTHROPIC}\np99=12ms"},
+            {"step_index": 4, "source": "SYSTEM", "type": "CHECKPOINT", "content": "SNAPSHOT"},
+        ]
+        src.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        counts = sanitize_session(src, dest, "antigravity", {})
+        text = dest.read_text()
+        for gone in ("OLD HISTORY", "IDE CURSOR STATE", "BACKGROUND TASK", "USER_REQUEST", "screen.png",
+                     "PRIVATE ANTIGRAVITY THINKING", "SNAPSHOT", self.GITHUB, self.ANTHROPIC):
+            self.assertNotIn(gone, text, gone)
+        for kept in ("check latency logs", "Inspecting run.log.", '"run_command"', "[REDACTED:github-token]",
+                     "[REDACTED:anthropic-key]", "p99=12ms"):
+            self.assertIn(kept, text, kept)
+        self.assertEqual(counts["kept records"], 3)
+        sanitize_session(dest, again, "antigravity", {})
+        self.assertEqual(again.read_text(), text)  # idempotent
+
 
 REVIEWER = r'''#!/usr/bin/env python3
-"""A fake Claude Code / Codex reviewer: redacts a name in the copy the prompt names; logs its argv."""
+"""A fake Claude Code / Codex / Pi / Antigravity reviewer: redacts a name when allowed; logs its argv."""
 import json, os, re, sys
 argv = sys.argv[1:]
+prog = os.path.basename(sys.argv[0])
 log = os.environ["FAKE_REVIEW_LOG"]
 if argv[:2] == ["debug", "prompt-input"]:          # codex: report the profile it was given
     prof = next((a.split("=", 1)[1].strip('"') for a in argv if a.startswith("default_permissions=")), None)
@@ -490,8 +667,9 @@ if argv[:2] == ["debug", "prompt-input"]:          # codex: report the profile i
     print(f"`sandbox_mode` is `workspace-write`. Network access is restricted. The writable {word} {roots}.{deny}")
     sys.exit(0)
 with open(log, "a") as f:
-    f.write(json.dumps({"argv": argv}) + "\n")
-prompt = sys.stdin.read()
+    f.write(json.dumps({"prog": prog, "argv": argv}) + "\n")
+raw = sys.stdin.read()
+prompt = json.loads(raw)["message"]["content"] if prog == "agy" else raw
 with open(log + ".prompt", "w") as f:
     f.write(prompt)
 copy = re.search(r"The copy: (\S+)", prompt).group(1)
@@ -501,7 +679,14 @@ if "cannot change files" not in prompt:
         text += "{not json\n"
     open(copy, "w").write(text)
 answer = "- names: 1 replaced with [REDACTED:name]"
-if "-o" in argv:                                   # codex exec
+if prog == "pi":
+    sid = argv[argv.index("--session-id") + 1]
+    print(json.dumps({"type": "session", "version": 3, "id": sid}))
+    print(json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": answer}]}}))
+elif prog == "agy":
+    print(json.dumps({"type": "init", "conversation_id": "agy-review-1"}))
+    print(json.dumps({"type": "result", "status": "success", "response": answer}))
+elif "-o" in argv:                                 # codex exec
     open(argv[argv.index("-o") + 1], "w").write(answer)
     print(json.dumps({"type": "thread.started", "thread_id": "codex-review-1"}))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": answer}}))
@@ -512,7 +697,7 @@ else:                                              # claude -p
 
 
 class TraceReviewTests(unittest.TestCase):
-    """`agentledger trace review` runs Claude Code or Codex over the prepared copy, able to change only its folder."""
+    """`agentledger trace review` runs an agent over the prepared copy, able to change only its folder."""
 
     def setUp(self):
         from agentledger import sandbox
@@ -523,7 +708,7 @@ class TraceReviewTests(unittest.TestCase):
         self.store = Store(init_store(self.tmp / "store", name="R"))
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name in ("claude", "codex"):
+        for name in ("claude", "codex", "pi", "agy"):
             (bin_dir / name).write_text(REVIEWER)
             (bin_dir / name).chmod(0o755)
         self.log = self.tmp / "review.log"
@@ -532,9 +717,12 @@ class TraceReviewTests(unittest.TestCase):
         tempfile.tempdir = str(self.tmp / "t")
         self.env = mock.patch.dict(os.environ, {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "CLAUDE_CONFIG_DIR": str(self.claude),
-            "CODEX_HOME": str(self.tmp / "codex"), "HOME": str(self.tmp / "home"), "FAKE_REVIEW_LOG": str(self.log)})
+            "CODEX_HOME": str(self.tmp / "codex"), "PI_CODING_AGENT_DIR": str(self.tmp / "pi"),
+            "ANTIGRAVITY_HOME": str(self.tmp / "antigravity"), "HOME": str(self.tmp / "home"),
+            "FAKE_REVIEW_LOG": str(self.log)})
         self.env.start()
-        for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AGENTLEDGER_ASK_SANDBOX", "FAKE_BREAK_JSONL"):
+        for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PI_SESSION_FILE", "PI_SESSION_ID",
+                  "ANTIGRAVITY_CONVERSATION_ID", "AGENTLEDGER_ASK_SANDBOX", "FAKE_BREAK_JSONL"):
             os.environ.pop(k, None)
         sandbox._AVAILABLE.clear()
         sandbox._AVAILABLE.update({"claude": True, "codex": True})
@@ -624,6 +812,15 @@ class TraceReviewTests(unittest.TestCase):
         self.assertIn("could not change the copy", out)
         self.assertIn("cannot change files", (self.tmp / "review.log.prompt").read_text())
 
+    def test_pi_and_antigravity_review_read_only_and_list_changes(self):
+        for agent, expected_flag in (("pi", "--offline"), ("antigravity", "--sandbox"), ("agy", "--sandbox")):
+            code, out, err = self.review(agent)
+            self.assertEqual(code, 0, err)
+            self.assertIn(expected_flag, self.argv())
+            self.assertIn("could not change the copy", out)
+            self.assertIn("Ada Lovelace", self.copy.read_text())
+            self.assertIn("cannot change files", (self.tmp / "review.log.prompt").read_text())
+
     def test_a_review_that_breaks_the_file_is_an_error(self):
         os.environ["FAKE_BREAK_JSONL"] = "1"
         code, out, err = self.review("claude")
@@ -711,9 +908,46 @@ class AutomationTests(unittest.TestCase):
         finally:
             os.environ.pop("XDG_CONFIG_HOME", None)
         self.assertEqual(out.strip(), str(store))
-        for agent in ("claude-code", "codex"):
+        for agent in ("claude-code", "codex", "pi", "antigravity"):
             skill = (skills / agent / "agentledger" / "SKILL.md").read_text()
             self.assertTrue(skill.startswith("---\nname: agentledger\ndescription: "))
+
+    def test_setup_agent_filter_and_env_overrides(self):
+        store = init_store(self.tmp / "store", name="S")
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "config")}):
+            # 1. Invalid --agent fails cleanly before touching anything
+            bad_store = self.tmp / "uncreated"
+            code, _, err = run_err("setup", str(bad_store), "--agent", "bogus")
+            self.assertEqual(code, 2)
+            self.assertIn("unknown --agent", err)
+            self.assertFalse(bad_store.exists())
+
+            # 2. --agent selects only requested harnesses (comma-separated, repeatable, aliases)
+            only_pi = self.tmp / "only-pi"
+            code, out = run("setup", str(store), "--skills-dir", str(only_pi), "--agent", "pi")
+            self.assertEqual(code, 0, out)
+            self.assertEqual({p.name for p in only_pi.iterdir()}, {"pi"})
+            self.assertTrue((only_pi / "pi" / "agentledger" / "SKILL.md").is_file())
+
+            subset = self.tmp / "subset"
+            code, out = run("setup", str(store), "--skills-dir", str(subset), "--agent", "agy,codex", "--agent", "pi")
+            self.assertEqual(code, 0, out)
+            self.assertEqual({p.name for p in subset.iterdir()}, {"antigravity", "codex", "pi"})
+
+            # 3. Default skill paths respect PI_CODING_AGENT_DIR and ANTIGRAVITY_HOME / GEMINI_CLI_HOME
+            fake_home = self.tmp / "fake-home"
+            pi_dir = self.tmp / "custom-pi"
+            ag_dir = self.tmp / "custom-ag"
+            with mock.patch.dict(os.environ, {
+                "HOME": str(fake_home),
+                "PI_CODING_AGENT_DIR": str(pi_dir),
+                "ANTIGRAVITY_HOME": str(ag_dir),
+            }):
+                code, out = run("setup", str(store), "--agent", "pi,antigravity")
+                self.assertEqual(code, 0, out)
+            self.assertTrue((pi_dir / "skills" / "agentledger" / "SKILL.md").is_file())
+            self.assertTrue((ag_dir / "config" / "skills" / "agentledger" / "SKILL.md").is_file())
+            self.assertFalse((fake_home / ".claude").exists())
 
     def test_repo_skill_matches_packaged_skill(self):
         top = Path(__file__).resolve().parent.parent
@@ -822,6 +1056,43 @@ class AskTests(unittest.TestCase):
         bad.feed(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True}))
         self.assertTrue(bad.error)
 
+    def test_pi_and_antigravity_stream_parsing(self):
+        pst = PiStream()
+        pnotes = [pst.feed(json.dumps(e)) for e in (
+            {"type": "session", "version": 3, "id": "pi-s1"},
+            {"type": "tool_execution_start", "toolName": "grep", "args": {"pattern": "tok", "path": "/x/a.jsonl"}},
+            {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "pi final"}]}},
+        )]
+        self.assertEqual(pst.session_id, "pi-s1")
+        self.assertEqual(pnotes[1], "grep 'tok' in a.jsonl")
+        self.assertEqual(pst.final(), "pi final")
+        pbad = PiStream()
+        pbad.feed(json.dumps({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "rate limit"}}))
+        self.assertEqual(pbad.error, "rate limit")
+
+        ast = AntigravityStream()
+        anotes = [ast.feed(json.dumps(e)) for e in (
+            {"type": "init", "conversation_id": "ag-c1"},
+            {"type": "step_update", "step_type": "tool_call", "tool_name": "grep_search", "args": {"Query": "tok", "SearchPath": "/x/b.jsonl"}},
+            {"type": "step_update", "step_type": "assistant", "delta": "streamed "},
+            {"type": "result", "status": "success", "response": "agy final"},
+        )]
+        self.assertEqual(ast.conversation_id, "ag-c1")
+        self.assertEqual(anotes[1], "grep_search 'tok' in b.jsonl")
+        self.assertEqual(ast.final(), "agy final")
+        aenv = AntigravityStream()
+        enotes = [aenv.feed(json.dumps(e)) for e in (
+            {"event": "step_update", "step_update": {"conversation_id": "ag-c2", "step_index": 1, "step_type": "tool",
+             "state": "ACTIVE", "tool_name": "view_file", "tool_info": {"parameters": {"AbsolutePath": "/x/c.md"}}}},
+            {"event": "result", "result": {"status": "SUCCESS", "response": "enveloped final"}},
+        )]
+        self.assertEqual(aenv.session_id, "ag-c2")
+        self.assertEqual(enotes[0], "view_file c.md")
+        self.assertEqual(aenv.final(), "enveloped final")
+        abad = AntigravityStream()
+        abad.feed(json.dumps({"type": "result", "status": "error", "error": "auth failed"}))
+        self.assertEqual(abad.error, "auth failed")
+
     def test_detect_claude_session(self):
         work = self.tmp / "work dir"
         work.mkdir()
@@ -830,14 +1101,17 @@ class AskTests(unittest.TestCase):
         (proj / "old.jsonl").write_text("{}")
         os.utime(proj / "old.jsonl", (time.time() - 600, time.time() - 600))
         (proj / "current.jsonl").write_text("{}")
-        os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
-        os.environ["CODEX_HOME"] = str(self.tmp / "no-codex")
-        try:
+        with mock.patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
+            "CODEX_HOME": str(self.tmp / "no-codex"),
+            "PI_CODING_AGENT_DIR": str(self.tmp / "no-pi"),
+            "ANTIGRAVITY_HOME": str(self.tmp / "no-ag"),
+        }):
+            for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PI_SESSION_FILE", "PI_SESSION_ID",
+                      "ANTIGRAVITY_CONVERSATION_ID"):
+                os.environ.pop(k, None)
             self.assertEqual(detect_session(work).name, "current.jsonl")
             self.assertIsNone(detect_session(self.tmp))
-        finally:
-            os.environ.pop("CLAUDE_CONFIG_DIR")
-            os.environ.pop("CODEX_HOME")
 
     def test_server_ask_round_trip(self):
         backend = resolve_backend(cmd=self.cmd)
@@ -909,24 +1183,59 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "se
                   "result": "fake claude answer" + (" (resumed)" if "--resume" in argv else "")}))
 """
 
+FAKE_PI = """#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_ARGV_LOG"] + ".pi", "a") as f:
+    f.write(json.dumps(argv) + "\\n")
+prompt = sys.stdin.read()
+with open(os.environ["FAKE_ARGV_LOG"] + ".prompts", "a") as f:
+    f.write(json.dumps(prompt) + "\\n")
+sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--session") + 1]
+resumed = "--fork" in argv or "--session" in argv
+print(json.dumps({"type": "session", "version": 3, "id": sid}))
+print(json.dumps({"type": "tool_execution_start", "toolName": "read", "args": {"path": "/x/report.md"}}))
+print(json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [
+    {"type": "text", "text": "fake pi answer" + (" (resumed)" if resumed else "")}]}}))
+"""
+
+FAKE_AGY = """#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_ARGV_LOG"] + ".agy", "a") as f:
+    f.write(json.dumps(argv) + "\\n")
+event = json.loads(sys.stdin.read())
+with open(os.environ["FAKE_ARGV_LOG"] + ".prompts", "a") as f:
+    f.write(json.dumps(event["message"]["content"]) + "\\n")
+cid = argv[argv.index("--conversation") + 1] if "--conversation" in argv else "agy-fresh-conv-1"
+print(json.dumps({"type": "init", "conversation_id": cid}))
+print(json.dumps({"type": "step_update", "step_type": "tool_call", "tool_name": "view_file", "args": {"AbsolutePath": "/x/report.md"}}))
+print(json.dumps({"type": "result", "status": "success", "conversation_id": cid,
+                  "response": "fake agy answer" + (" (resumed)" if "--conversation" in argv else "")}))
+"""
+
 
 class SessionAskTests(unittest.TestCase):
     """Ask continues the session that wrote the report: forked once per thread, then continued."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.saved = {k: os.environ.get(k) for k in ("PATH", "CLAUDE_CONFIG_DIR", "FAKE_ARGV_LOG", "FAKE_FAIL_RESUME",
-                                                   "CLAUDE_CODE_ENTRYPOINT", "AGENTLEDGER_ASK_ENTRYPOINT",
-                                                   "AGENTLEDGER_ASK_SANDBOX", "FAKE_FAIL_SANDBOX", "HOME")}
+        self.saved = {k: os.environ.get(k) for k in ("PATH", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR",
+                                                     "ANTIGRAVITY_HOME", "FAKE_ARGV_LOG", "FAKE_FAIL_RESUME",
+                                                     "CLAUDE_CODE_ENTRYPOINT", "AGENTLEDGER_ASK_ENTRYPOINT",
+                                                     "AGENTLEDGER_ASK_SANDBOX", "FAKE_FAIL_SANDBOX", "HOME")}
         from agentledger import sandbox
         sandbox._AVAILABLE.clear()
         os.environ["AGENTLEDGER_ASK_SANDBOX"] = "off"  # these tests cover sessions; SandboxAskTests covers the sandbox
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        (bin_dir / "claude").write_text(FAKE_CLAUDE)
-        (bin_dir / "claude").chmod(0o755)
+        for name, script in (("claude", FAKE_CLAUDE), ("pi", FAKE_PI), ("agy", FAKE_AGY)):
+            (bin_dir / name).write_text(script)
+            (bin_dir / name).chmod(0o755)
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
+        os.environ["PI_CODING_AGENT_DIR"] = str(self.tmp / "pi")
+        os.environ["ANTIGRAVITY_HOME"] = str(self.tmp / "antigravity")
         os.environ["FAKE_ARGV_LOG"] = str(self.tmp / "argv.log")
         os.environ.pop("FAKE_FAIL_RESUME", None)
         self.repo = self.tmp / "repo"
@@ -981,6 +1290,57 @@ class SessionAskTests(unittest.TestCase):
             self.assertNotIn("--fork-session", later)
             self.assertNotIn("--session-id", later)
         self.assertIn("another question", self.prompts()[-1])
+
+    def test_pi_session_forks_once_then_continues(self):
+        from agentledger.ask import answer_thread, review_session
+        pi_sid = "22222222-3333-4444-5555-666666666666"
+        fake_pi_session(self.tmp / "pi", self.repo, sid=pi_sid)
+        self.store.publish("p/pi-report", DEMO / "dna-primer.md",
+                           session={"agent": "pi", "id": pi_sid, "cwd": str(self.repo)})
+        cid = self.store.add_comment("p/pi-report", "how did pi measure it?", module="outcome", author="carol")["id"]
+        backend = resolve_backend("pi")
+        self.assertEqual(backend.kind, "pi")
+        row = answer_thread(self.store, cid, backend)
+        self.assertEqual((row["body"], row["author"]), ("fake pi answer (resumed)", "pi"))
+        calls = [json.loads(ln) for ln in (self.tmp / "argv.log.pi").read_text().splitlines()]
+        first = calls[-1]
+        self.assertEqual(first[first.index("--fork") + 1], pi_sid)
+        fork = first[first.index("--session-id") + 1]
+        self.assertNotEqual(fork, pi_sid)
+        self.assertEqual(first[first.index("--name") + 1], "AgentLedger: p/pi-report v1")
+        for flag in ("--offline", "--no-extensions", "--no-mcp", "--no-skills"):
+            self.assertIn(flag, first)
+        self.assertEqual(first[first.index("--tools") + 1], "read,grep,find,ls")
+        self.assertEqual(review_session(self.store, {"report": "p/pi-report", "version": "1"})["id"], fork)
+        self.store.reply(cid, "follow-up?", author="carol", role="human")
+        answer_thread(self.store, cid, backend)
+        second = [json.loads(ln) for ln in (self.tmp / "argv.log.pi").read_text().splitlines()][-1]
+        self.assertEqual(second[second.index("--session") + 1], fork)
+        self.assertNotIn("--fork", second)
+        self.assertNotIn("--name", second)
+
+    def test_antigravity_session_resumes_and_continues(self):
+        from agentledger.ask import answer_thread, review_session
+        ag_cid = "v1/default/jetski_remote_agents_3p/77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+        fake_antigravity_session(self.tmp / "antigravity", self.repo, cid=ag_cid, brain_sub="jetski/brain")
+        self.store.publish("p/ag-report", DEMO / "dna-primer.md",
+                           session={"agent": "antigravity", "id": ag_cid, "cwd": str(self.repo)})
+        cid = self.store.add_comment("p/ag-report", "why this primer?", module="outcome", author="carol")["id"]
+        backend = resolve_backend("antigravity")
+        self.assertEqual((backend.kind, backend.name), ("antigravity", "antigravity"))
+        self.assertEqual(resolve_backend("agy").kind, "antigravity")
+        row = answer_thread(self.store, cid, backend)
+        self.assertEqual((row["body"], row["author"]), ("fake agy answer (resumed)", "antigravity"))
+        first = [json.loads(ln) for ln in (self.tmp / "argv.log.agy").read_text().splitlines()][-1]
+        self.assertEqual(first[first.index("--conversation") + 1], ag_cid)
+        for flag in ("--sandbox", "--disable-slash-commands"):
+            self.assertIn(flag, first)
+        self.assertEqual(first[first.index("--add-dir") + 1], str(self.root))
+        self.assertEqual(review_session(self.store, {"report": "p/ag-report", "version": "1"})["id"], ag_cid)
+        self.store.reply(cid, "another detail?", author="carol", role="human")
+        answer_thread(self.store, cid, backend)
+        second = [json.loads(ln) for ln in (self.tmp / "argv.log.agy").read_text().splitlines()][-1]
+        self.assertEqual(second[second.index("--conversation") + 1], ag_cid)
 
     def test_questions_at_once_share_one_fork(self):
         from agentledger.ask import answer_thread
@@ -1313,26 +1673,46 @@ class SandboxAskTests(unittest.TestCase):
         (home / ".aws-real").mkdir()
         (home / ".aws").symlink_to(home / ".aws-real")
         (home / ".codex" / "state_5.sqlite").write_text("")
+        (home / ".pi" / "agent").mkdir(parents=True)
+        (home / ".pi" / "agent" / "auth.json").write_text("{}")
+        (home / ".gemini").mkdir(parents=True)
+        (home / ".gemini" / "oauth_creds.json").write_text("{}")
+        (home / ".gemini" / "antigravity-cli").mkdir()
         (home / ".zsh_sessions").mkdir()
         found = sandbox.secret_paths([self.repo])
         self.assertIn((home / ".zsh_sessions").resolve(), found)              # macOS Terminal's per-window history
         self.assertIn((home / ".codex" / "state_5.sqlite").resolve(), found)   # globbed
         self.assertTrue((home / ".codex" / "sessions").is_dir())              # made first, so it is denied from the start
         self.assertIn((home / ".codex" / "sessions").resolve(), found)
+        self.assertIn((home / ".pi" / "agent" / "auth.json").resolve(), found)
+        self.assertIn((home / ".pi" / "agent" / "sessions").resolve(), found)
+        self.assertIn((home / ".gemini" / "oauth_creds.json").resolve(), found)
+        self.assertIn((home / ".gemini" / "antigravity-cli").resolve(), found)
         elsewhere = self.tmp / "elsewhere"
         (elsewhere / "claude-cfg").mkdir(parents=True)
         (elsewhere / "codex-home").mkdir()
         (elsewhere / "codex-home" / "auth.json").write_text("{}")
-        os.environ["CLAUDE_CONFIG_DIR"] = str(elsewhere / "claude-cfg")
-        os.environ["CODEX_HOME"] = str(elsewhere / "codex-home")
-        try:
+        (elsewhere / "pi-dir").mkdir()
+        (elsewhere / "pi-dir" / "auth.json").write_text("{}")
+        (elsewhere / "pi-sessions").mkdir()
+        (elsewhere / "ag-home" / "jetski").mkdir(parents=True)
+        (elsewhere / "ag-home" / "oauth_creds.json").write_text("{}")
+        with mock.patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(elsewhere / "claude-cfg"),
+            "CODEX_HOME": str(elsewhere / "codex-home"),
+            "PI_CODING_AGENT_DIR": str(elsewhere / "pi-dir"),
+            "PI_CODING_AGENT_SESSION_DIR": str(elsewhere / "pi-sessions"),
+            "ANTIGRAVITY_HOME": str(elsewhere / "ag-home"),
+        }):
             moved = sandbox.secret_paths([])
-        finally:
-            os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
-            os.environ.pop("CODEX_HOME", None)
         self.assertIn((elsewhere / "claude-cfg").resolve(), moved)          # where the credentials really are
         self.assertIn((elsewhere / "codex-home" / "auth.json").resolve(), moved)
         self.assertIn((elsewhere / "codex-home" / "sessions").resolve(), moved)
+        self.assertIn((elsewhere / "pi-dir" / "auth.json").resolve(), moved)
+        self.assertIn((elsewhere / "pi-dir" / "sessions").resolve(), moved)
+        self.assertIn((elsewhere / "pi-sessions").resolve(), moved)
+        self.assertIn((elsewhere / "ag-home" / "oauth_creds.json").resolve(), moved)
+        self.assertIn((elsewhere / "ag-home" / "jetski").resolve(), moved)
         self.assertIn((home / ".aws-real").resolve(), found)
         self.assertNotIn(home / ".gnupg", found)
         self.assertIn((self.repo / ".env").resolve(), found)
@@ -1621,6 +2001,37 @@ class ShareTests(unittest.TestCase):
         from agentledger import share
         reader, _ = share.unpack(self.bundle, self.tmp / "reader")
         self.assertEqual(len(reader.report("demo/benchmark").versions), 2)
+
+    def test_share_trims_raw_pi_and_antigravity_transcripts(self):
+        raw_pi = self.tmp / "pi-raw.jsonl"
+        raw_pi.write_text("\n".join(json.dumps(x) for x in [
+            {"type": "session", "version": 3, "id": SID, "cwd": "/w", "parentSession": "/secret/p.jsonl"},
+            {"type": "message", "id": "s0", "message": {"role": "system", "content": "PI SYSTEM PROMPT"}},
+            {"type": "message", "id": "u1", "message": {"role": "user", "content": "check pi bench"}},
+            {"type": "message", "id": "a1", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "PI PRIVATE THOUGHTS"},
+                {"type": "text", "text": f"pi token {self.GITHUB} -> 4721 us"}]}},
+        ]) + "\n")
+        raw_ag = self.tmp / "ag-raw.jsonl"
+        raw_ag.write_text("\n".join(json.dumps(x) for x in [
+            {"step_index": 0, "source": "SYSTEM", "type": "CONVERSATION_HISTORY", "content": "AG OLD HISTORY"},
+            {"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+             "content": "<ADDITIONAL_METADATA>AG CURSOR</ADDITIONAL_METADATA><USER_REQUEST>check ag bench</USER_REQUEST>"},
+            {"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "thinking": "AG PRIVATE THOUGHTS",
+             "content": f"ag key {self.ANTHROPIC} -> 4721 us"},
+        ]) + "\n")
+        self.owner.publish("demo/benchmark", DEMO / "benchmark-v2.md", traces=[raw_pi, raw_ag])
+        code, out = run("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.bundle))
+        self.assertEqual(code, 0, out)
+        texts = self.bundle_texts(self.bundle)
+        everything = "\n".join(texts.values())
+        for gone in ("parentSession", "PI SYSTEM PROMPT", "PI PRIVATE THOUGHTS", "AG OLD HISTORY", "AG CURSOR",
+                     "AG PRIVATE THOUGHTS", self.GITHUB, self.ANTHROPIC):
+            self.assertNotIn(gone, everything, gone)
+        for kept in ("check pi bench", "check ag bench", "[REDACTED:github-token]", "[REDACTED:anthropic-key]"):
+            self.assertIn(kept, everything, kept)
+        marker = json.loads(texts["agentledger-share.json"])
+        self.assertEqual(marker["redaction"]["sessions_trimmed"], 2)
 
     def test_clean_bundle_says_so_and_keeps_bytes(self):
         code, out = run("--store", str(self.owner.root), "share", "demo/benchmark", "-o", str(self.bundle))

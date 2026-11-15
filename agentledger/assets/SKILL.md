@@ -46,9 +46,9 @@ if the user already has a store clone, append `-s -- <path>`). If it says no sto
      replace personal data (e-mail addresses it lists, names, machine accounts), credentials it missed, other
      people's data, and work unrelated to the report;
    - `agentledger trace approve <id>`; then publish with `--trace auto`, which shares exactly the approved file.
-   (From the command line, `agentledger trace review <id> [--agent claude|codex]` runs that review by an agent in its
-   sandbox, able to change only the copy; approving stays a separate step.)
-   `agentledger publish <id> <draft> --author <claude-code|codex> --summary "<one line>" --link-session auto
+   (From the command line, `agentledger trace review <id> [--agent claude|codex|pi|antigravity]` runs that review by an
+   agent in its sandbox, able to change only the copy; approving stays a separate step.)
+   `agentledger publish <id> <draft> --author <claude-code|codex|pi|antigravity> --summary "<one line>" --link-session auto
    [--trace auto] [--trace <log>]` (for a revision add `--changes "<what changed>"`). `--trace <log>` attaches a
    file as it is, so attach only logs you have checked (`agentledger trace check <file>` looks for secrets).
 5. `agentledger sync -m "<id> vN: <short title>"` commits and pushes the store.

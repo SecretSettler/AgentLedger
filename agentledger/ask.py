@@ -5,17 +5,18 @@ review thread so far, the repository the report describes, and the traces
 attached at publish time are the context.  The answer comes from the agent CLI
 already installed on this machine, and is saved as an agent reply in the thread.
 
-The agent reads first (Claude Code: Read, Grep, Glob) and runs programs only when
-reading cannot settle the question or the answer has to be computed.  It runs them in
-its own sandbox (see ``sandbox.py``: no network, secrets unreadable, writes only to a
-scratch folder); where that sandbox is not available, Ask stays read-only.
+The agent reads first (Claude Code: Read, Grep, Glob; Pi: read, grep, find, ls) and runs
+programs only when reading cannot settle the question or the answer has to be computed.
+Claude Code and Codex run them in their own sandbox (see ``sandbox.py``: no network, secrets
+unreadable, writes only to a scratch folder); where that sandbox is not available (including
+Pi and Antigravity), Ask stays read-only.
 
 When the version links the session that wrote it (``publish --link-session``), the question goes to the
 very session that wrote it, so the agent answers with its full memory of the
-work: Claude Code resumes it as a fork (``--resume --fork-session``, the original
-stays untouched), Codex resumes it in place (``codex exec resume``).  The first
-question on a report version starts its review session that way, or as a fresh
-run when no session was recorded; every later question on that version,
+work: Claude Code and Pi resume it as a fork (``--resume --fork-session``, ``pi --fork``, so the
+original stays untouched), while Codex and Antigravity resume it in place (``codex exec resume``,
+``agy --conversation``).  The first question on a report version starts its review session that
+way, or as a fresh run when no session was recorded; every later question on that version,
 in any thread, continues the review session, so the agent remembers the review so
 far.  Questions on one version run one at a time.  If the session cannot be resumed,
 a fresh run answers from the traces instead.
@@ -59,12 +60,37 @@ CODEX_OFF = ("apps", "browser_use", "browser_use_external", "in_app_browser", "c
              "remote_plugin", "image_generation", "hooks")
 CODEX_FLAGS = ("-c", 'web_search="disabled"', "-c", "mcp_servers={}", *[a for f in CODEX_OFF for a in ("--disable", f)])
 CODEX_ARGV = ["codex", "exec", "--sandbox", "read-only", *CODEX_FLAGS, "--skip-git-repo-check", "--json"]
+# Pi runs strictly read-only: only read/grep/find/ls are loaded, no extensions, no MCP servers, no project trust, offline.
+PI_ARGV = [
+    "pi", "-p", "--mode", "json", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates",
+    "--no-themes", "--no-context-files", "--no-approve", "--offline",
+    "--tools", "read,grep,find,ls", "--exclude-tools", "mcp__*",
+]
+# Antigravity CLI (`agy`) runs headless in default request-review mode with `--sandbox`: workspace/store file reads are
+# allowed while file edits, web tools and unsandboxed commands are refused automatically without interactive prompts.
+ANTIGRAVITY_ARGV = [
+    "agy", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--disable-slash-commands", "--sandbox",
+]
+
+AGENTS = ("claude", "codex", "pi", "antigravity")
+BACKEND_BINS = {"claude": "claude", "codex": "codex", "pi": "pi", "antigravity": "agy"}
+BACKEND_ALIASES = {"agy": "antigravity", "claude-code": "claude"}
+_AGENT_ARGV = {
+    "claude": CLAUDE_ARGV,
+    "codex": CODEX_ARGV,
+    "pi": PI_ARGV,
+    "antigravity": ANTIGRAVITY_ARGV,
+}
+
 # When serve itself runs inside an agent session, the child agent must not attach to that parent session.
 # Auth and provider settings (API keys, Bedrock/Vertex switches) are left alone.
 SCRUB_ENV = (
     "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_AFTER_LAST_COMPACT",
     "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+    "AI_AGENT", "PI_CODING_AGENT", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL",
+    "ANTIGRAVITY_CONVERSATION_ID", "GEMINI_CONVERSATION_ID",
 )
 THREAD_SESSIONS = "ask-sessions.json"
 # Claude Code leaves sessions whose entrypoint is sdk-cli, sdk-ts or sdk-py out of `claude --resume` and the IDE's
@@ -81,11 +107,15 @@ class AskError(Exception):
 class Backend:
     name: str
     argv: list[str]
-    kind: str  # "claude", "codex" or "plain" (prompt on stdin, answer on stdout)
+    kind: str  # "claude", "codex", "pi", "antigravity" or "plain" (prompt on stdin, answer on stdout)
+
+
+def backend_bin(name: str) -> str:
+    return BACKEND_BINS.get(name, name)
 
 
 def agent_backend(name: str) -> Backend:
-    return Backend(name, list(CLAUDE_ARGV if name == "claude" else CODEX_ARGV), name)
+    return Backend(name, list(_AGENT_ARGV[name]), name)
 
 
 def resolve_backend(choice: Optional[str] = "auto", cmd: Optional[str] = None) -> Optional[Backend]:
@@ -100,14 +130,19 @@ def resolve_backend(choice: Optional[str] = "auto", cmd: Optional[str] = None) -
         return Backend(name, argv, "plain")
     if choice == "off":
         return None
-    order = ["claude", "codex"] if choice in (None, "auto") else [choice]
+    norm = BACKEND_ALIASES.get(choice, choice) if choice else choice
+    order = list(AGENTS) if norm in (None, "auto") else [norm]
     for name in order:
-        if name not in ("claude", "codex"):
-            raise LedgerError(f"unknown ask backend {name!r}: use claude, codex, auto, off, or --ask-cmd")
-        if shutil.which(name):
+        if name not in AGENTS:
+            raise LedgerError(
+                f"unknown ask backend {name!r}: use claude, codex, pi, antigravity, auto, off, or --ask-cmd"
+            )
+        binary = backend_bin(name)
+        if shutil.which(binary):
             return agent_backend(name)
-        if choice not in (None, "auto"):
-            raise LedgerError(f"`{name}` is not on PATH")
+        if norm not in (None, "auto"):
+            label = f"`{binary}` ({name})" if binary != name else f"`{name}`"
+            raise LedgerError(f"{label} is not on PATH")
     return None
 
 
@@ -153,7 +188,7 @@ def _review_lock(key: str) -> threading.Lock:
 class Plan:
     backend: Backend
     resume: Optional[str] = None  # session id to continue
-    fork: bool = False            # Claude: branch off instead of appending to the original
+    fork: bool = False            # Claude / Pi: branch off instead of appending to the original
     cwd: Optional[Path] = None
     note: str = ""
     again: bool = False           # continuing this version's review session
@@ -163,22 +198,24 @@ def plan(store: Store, root: dict, default: Optional[Backend], choice: str = "au
     """Pick who answers: this version's review session, else the session that wrote the report, else ``default``."""
     if default is not None and default.kind == "plain":
         return Plan(default)
+    norm = BACKEND_ALIASES.get(choice, choice) if choice else "auto"
     report = store.report(root["report"])
     mine = review_session(store, root)
-    if mine and shutil.which(mine["agent"]) and choice in ("auto", mine["agent"]):
+    if mine and mine.get("agent") in AGENTS and shutil.which(backend_bin(mine["agent"])) and norm in ("auto", mine["agent"]):
         return Plan(agent_backend(mine["agent"]), mine["id"], False, _dir(mine.get("cwd")),
                     "continuing this report's review session", again=True)
     versions = [report.version(int(root["version"]))] + [v for v in reversed(report.versions) if v.number != int(root["version"])]
     for v in versions:
         s = v.meta.get("session")
-        if not s or not shutil.which(s.get("agent", "")) or choice not in ("auto", s["agent"]):
+        agent = (s or {}).get("agent", "")
+        if not s or agent not in AGENTS or not shutil.which(backend_bin(agent)) or norm not in ("auto", agent):
             continue
         if session_transcript(s) is None:
             continue  # written on another machine
-        return Plan(agent_backend(s["agent"]), s["id"], s["agent"] == "claude", session_cwd(store, report.id, v.number, s),
-                    f"resuming the {s['agent']} session that wrote v{v.number}")
+        return Plan(agent_backend(agent), s["id"], agent in ("claude", "pi"), session_cwd(store, report.id, v.number, s),
+                    f"resuming the {agent} session that wrote v{v.number}")
     if default is None:
-        raise AskError("no agent to ask: install Claude Code or Codex, or start serve with --ask-cmd")
+        raise AskError("no agent to ask: install Claude Code, Codex, Pi or Antigravity, or start serve with --ask-cmd")
     return Plan(default)
 
 
@@ -224,6 +261,14 @@ def tool_guidance(kind: str, scratch: Optional[Path]) -> list[str]:
     """How the agent should gather evidence: read first, run programs only when reading cannot settle it.
 
     ``scratch`` is the sandbox's writable folder, or None when the run is read-only."""
+    if kind in ("pi", "antigravity"):
+        tools = " with read, grep, find and ls" if kind == "pi" else " by reading and searching files"
+        return [
+            f"- Find evidence{tools} first: most questions are answered by what the report, the traces or the"
+            " repository already say.",
+            "- You can read files but not run programs in this session. If the answer is a value that is not written"
+            " down and would have to be computed, say so and give the command that would compute it; do not guess.",
+        ]
     if kind == "claude":
         read = "Find evidence with Read, Grep and Glob first"
         run = "Run commands with Bash"
@@ -308,7 +353,7 @@ def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = Fa
         "",
         "Reply to the last message of the conversation, as the agent that wrote the report.",
         "- Check the claim against the source, the traces and the repository before answering; cite evidence as path:line.",
-        *(tool_guidance(kind, scratch) if kind in ("claude", "codex") else []),
+        *(tool_guidance(kind, scratch) if kind in AGENTS else []),
         "- If the report is wrong or unsupported, say so plainly and give the corrected statement.",
         "- If the evidence is not there and can't be obtained by running commands, say what is missing instead of guessing.",
         "- Be concise: a short paragraph or a few bullets.",
@@ -323,13 +368,17 @@ def build_prompt(store: Store, cid: str, resumed: bool = False, again: bool = Fa
 
 # ------------------------------------------------------------------ running
 def describe_tool(name: str, args: dict) -> str:
-    target = args.get("file_path") or args.get("path") or ""
-    if name == "Grep":
-        return f"Grep {args.get('pattern', '')!r}" + (f" in {Path(target).name}" if target else "")
-    if name == "Glob":
-        return f"Glob {args.get('pattern', '')}"
-    if name == "Bash":
-        return f"Bash: {' '.join(str(args.get('command', '')).split())[:160]}"
+    target = (args.get("file_path") or args.get("path") or args.get("AbsolutePath") or args.get("TargetFile")
+              or args.get("SearchPath") or args.get("DirectoryPath") or "")
+    if name in ("Grep", "grep", "grep_search"):
+        pat = args.get("pattern") or args.get("Query") or ""
+        return f"{name} {pat!r}" + (f" in {Path(target).name}" if target else "")
+    if name in ("Glob", "find", "find_by_name"):
+        pat = args.get("pattern") or args.get("Pattern") or ""
+        return f"{name} {pat}".strip()
+    if name in ("Bash", "bash", "run_command"):
+        cmd = args.get("command") or args.get("CommandLine") or ""
+        return f"{name}: {' '.join(str(cmd).split())[:160]}"
     if target:
         return f"{name} {Path(target).name}"
     return name
@@ -421,13 +470,118 @@ class CodexStream:
         return None
 
 
+class PiStream:
+    """Parse ``pi -p --mode json`` events: session header, tool progress, and final assistant message."""
+
+    def __init__(self):
+        self.session_id: Optional[str] = None
+        self.text: list[str] = []
+        self.error: Optional[str] = None
+
+    def feed(self, line: str) -> Optional[str]:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(ev, dict):
+            return None
+        kind = ev.get("type", "")
+        if kind == "session":
+            self.session_id = ev.get("id") or self.session_id
+            return None
+        if kind == "tool_execution_start":
+            return describe_tool(ev.get("toolName") or "", ev.get("args") if isinstance(ev.get("args"), dict) else {})
+        if kind == "message_end":
+            msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    self.text.append(content)
+                elif isinstance(content, list):
+                    parts = [b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
+                    if parts:
+                        self.text.append("\n".join(parts))
+                if msg.get("stopReason") in ("error", "aborted"):
+                    self.error = msg.get("errorMessage") or msg.get("stopReason") or "agent error"
+                else:
+                    self.error = None
+            return None
+        if kind == "auto_retry_end" and ev.get("success") is False:
+            self.error = ev.get("finalError") or self.error or "agent error"
+        return None
+
+    def final(self) -> str:
+        return self.text[-1].strip() if self.text else ""
+
+
+class AntigravityStream:
+    """Parse ``agy --output-format stream-json`` events: conversation id, tool steps, and terminal result."""
+
+    def __init__(self):
+        self.session_id: Optional[str] = None
+        self.answer: Optional[str] = None
+        self.deltas: list[str] = []
+        self.error: Optional[str] = None
+        self.seen_tools: set = set()
+
+    @property
+    def conversation_id(self) -> Optional[str]:
+        return self.session_id
+
+    def feed(self, line: str) -> Optional[str]:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(ev, dict):
+            return None
+        if ev.get("conversation_id"):
+            self.session_id = ev["conversation_id"]
+        kind = ev.get("event") or ev.get("type") or ""
+        if kind == "step_update":
+            su = ev.get("step_update") if isinstance(ev.get("step_update"), dict) else ev
+            if su.get("conversation_id"):
+                self.session_id = su["conversation_id"]
+            stype = su.get("step_type")
+            sidx = su.get("step_index")
+            if stype in ("tool", "tool_call") and (sidx is None or sidx not in self.seen_tools):
+                tinfo = su.get("tool_info") if isinstance(su.get("tool_info"), dict) else {}
+                tname = su.get("tool_name") or tinfo.get("name") or ""
+                params = (tinfo.get("parameters") if isinstance(tinfo.get("parameters"), dict)
+                          else (su.get("args") if isinstance(su.get("args"), dict) else {}))
+                if tname and (params or su.get("state") == "DONE" or stype == "tool_call"):
+                    if sidx is not None:
+                        self.seen_tools.add(sidx)
+                    return describe_tool(tname, params)
+            elif stype in ("agent_response", "assistant"):
+                delta = su.get("text_delta") or su.get("delta") or ""
+                state = su.get("state")
+                if delta and (state in (None, "ACTIVE") or (state == "DONE" and not self.deltas)):
+                    self.deltas.append(delta)
+            return None
+        if kind == "result":
+            res = ev.get("result") if isinstance(ev.get("result"), dict) else ev
+            if res.get("conversation_id"):
+                self.session_id = res["conversation_id"]
+            status = str(res.get("status", "SUCCESS"))
+            if status.upper() != "SUCCESS" or res.get("error"):
+                self.error = res.get("error") or status or "agent error"
+            else:
+                self.answer = res.get("response") or ""
+        return None
+
+    def final(self) -> str:
+        return (self.answer if self.answer is not None else "".join(self.deltas)).strip()
+
+
 def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
                 on_progress: Callable[[str], None] = lambda s: None, timeout: float = 900,
                 resume: Optional[str] = None, fork: bool = False,
                 name: Optional[str] = None, policy: Optional[sandbox.Policy] = None) -> tuple[str, Optional[str]]:
     """Run one question; return ``(answer, session id to continue)``.
 
-    ``name`` titles a new Claude Code session; ``policy`` runs the agent in its sandbox instead of read-only."""
+    ``name`` titles a new Claude Code / Pi session; ``policy`` runs the agent in its sandbox instead of read-only."""
     argv = list(backend.argv)
     if policy and backend.kind == "claude":
         argv = sandbox.claude_argv(argv, policy) if policy.writable else sandbox.claude_readonly_argv(argv, policy)
@@ -448,6 +602,17 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
         fd, last_msg = tempfile.mkstemp(prefix="agentledger-", suffix=".txt")
         os.close(fd)
         argv += ["-o", last_msg] + (["resume", resume, "-"] if resume else ["-"])
+    elif backend.kind == "pi":
+        if not resume or fork:
+            new_id = str(uuid.uuid4())
+        if resume:
+            argv += ["--fork" if fork else "--session", resume]
+        if new_id:
+            argv += ["--session-id", new_id, "--name", name or "AgentLedger: ask"]
+    elif backend.kind == "antigravity":
+        if resume:
+            argv += ["--conversation", resume]
+        argv += ["--add-dir", str(store_root)]
     env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
     if backend.kind == "claude":
         env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
@@ -484,12 +649,20 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
     session = None
     try:
         try:
-            proc.stdin.write(prompt)
+            stdin_payload = (json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+                             if backend.kind == "antigravity" else prompt)
+            proc.stdin.write(stdin_payload)
             proc.stdin.close()
         except BrokenPipeError:
             pass
-        if backend.kind in ("claude", "codex"):
-            stream = ClaudeStream() if backend.kind == "claude" else CodexStream()
+        if backend.kind in AGENTS:
+            stream_cls = {
+                "claude": ClaudeStream,
+                "codex": CodexStream,
+                "pi": PiStream,
+                "antigravity": AntigravityStream,
+            }[backend.kind]
+            stream = stream_cls()
             for ln in proc.stdout:
                 note = stream.feed(ln)
                 if note:
@@ -500,11 +673,11 @@ def run_backend(backend: Backend, prompt: str, cwd: Path, store_root: Path,
             if policy and policy.writable and isinstance(stream, ClaudeStream) and stream.sandbox_failed:
                 # Every command was refused (fail closed); answer again read-only rather than without evidence.
                 raise AskError(f"{backend.name}: the sandbox failed to initialize, so no command could run")
-            if backend.kind == "claude":
-                answer = stream.final()
-            else:
+            if backend.kind == "codex":
                 answer = Path(last_msg).read_text(encoding="utf-8").strip() if last_msg and Path(last_msg).exists() else ""
                 answer = answer or (stream.text[-1].strip() if stream.text else "")
+            else:
+                answer = stream.final()
             session = new_id or stream.session_id or resume
         else:
             answer = proc.stdout.read().strip()
@@ -558,6 +731,10 @@ def _answer(store: Store, cid: str, backend: Optional[Backend], choice: str, gua
             pol: Optional[sandbox.Policy]) -> tuple[str, Optional[str]]:
         if b.kind in ("claude", "codex"):
             on_progress(pol.summary() if pol else "read-only (--sandbox read-only): reads files, writes nothing")
+        elif b.kind == "pi":
+            on_progress("read-only (--tools read,grep,find,ls): reads files, writes nothing")
+        elif b.kind == "antigravity":
+            on_progress("read-only (headless --sandbox): reads files, writes nothing")
         try:
             return run_backend(b, text, where, store.root, on_progress, timeout, resume, fork, name=title, policy=pol)
         except AskError as exc:
@@ -594,7 +771,7 @@ def _answer(store: Store, cid: str, backend: Optional[Backend], choice: str, gua
     with guard:
         store.invalidate()
         store.save_rows([row])
-        if session and how.backend.kind in ("claude", "codex"):
+        if session and how.backend.kind in AGENTS:
             remember_review_session(store, root, {"agent": how.backend.kind, "id": session, "cwd": str(run_dir)})
         build(store)
     return row

@@ -1,7 +1,7 @@
 """``agentledger demo``: a sample store to try the review loop in one command.
 
-The numbers in the sample reports are made up.  When no Claude Code or Codex is
-installed, a stand-in agent answers Ask questions and says that it is a demo.
+The numbers in the sample reports are made up.  When no Claude Code, Codex, Pi or
+Antigravity CLI is installed, a stand-in agent answers Ask questions and says that it is a demo.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def create(target: Path) -> Store:
 
 
 def agent_main() -> int:
-    """Stand-in for Claude Code / Codex in the demo: reads the prompt, answers that it is a demo."""
+    """Stand-in for Claude Code / Codex / Pi / Antigravity in the demo: reads the prompt, answers that it is a demo."""
     prompt = sys.stdin.read()
     lines = prompt.splitlines()
     quote = next((ln[2:] for ln in lines if ln.startswith("> ")), "")
@@ -59,11 +59,11 @@ def agent_main() -> int:
     question = asked[-1].split(": ", 1)[-1] if asked else ""
     time.sleep(1.2)
     print(
-        "**This is the demo agent.** With Claude Code or Codex installed, the agent that wrote the report answers here, "
-        "from the report source, its traces and the repository (running programs only in its sandbox).\n\n"
+        "**This is the demo agent.** With Claude Code, Codex, Pi or Antigravity installed, the agent that wrote the "
+        "report answers here, from the report source, its traces and the repository (running programs only in its sandbox).\n\n"
         f"- You asked: {question}\n"
         + (f"- About: “{quote}”\n" if quote else "")
-        + "- Try it for real: `agentledger demo --ask claude` (or `--ask codex`)."
+        + "- Try it for real: `agentledger demo --ask claude` (or `codex`, `pi`, `antigravity`)."
     )
     return 0
 

@@ -1,15 +1,21 @@
 """Make an agent session safe to share: keep the conversation, drop the rest, and redact secrets.
 
-A Claude Code or Codex session file holds far more than the conversation: system prompts and skill text, files
-attached with ``@``, file-history snapshots, raw API request copies, reasoning, account and organisation ids.  And
-the conversation itself can hold secrets the agent read or was shown.  ``sanitize_session`` copies a session keeping
-only what a reviewer needs (an allow-list):
+An agent session file holds far more than the conversation: system prompts and skill text, files attached with ``@``,
+file-history snapshots, raw API request copies, reasoning, account and organisation ids.  And the conversation itself
+can hold secrets the agent read or was shown.  ``sanitize_session`` copies a session keeping only what a reviewer
+needs (an allow-list):
 
 * Claude Code: ``user`` messages that are not meta (text and tool results) and ``assistant`` messages (text and tool
   calls; no thinking).  ``<system-reminder>`` blocks are removed from every text.
 * Codex: the session id and working directory, ``user`` and ``assistant`` messages (minus the environment and
   instruction blocks Codex injects), tool calls and their outputs, compaction summaries (no reasoning, no developer
   messages, no account ids).
+* Pi: the session header (id and working directory), ``user`` and ``assistant`` messages (text and ``toolCall`` blocks;
+  no thinking, images or system messages), ``toolResult`` and non-excluded ``bashExecution`` messages, and compaction /
+  branch summaries (no usage, model or session-info records).
+* Antigravity: ``USER_INPUT`` steps (unwrapped from injected metadata tags), ``PLANNER_RESPONSE`` steps (text and
+  ``tool_calls``; no ``thinking`` or media), and tool execution steps (no ``CONVERSATION_HISTORY``, ``CHECKPOINT`` or
+  ``SYSTEM`` records).
 
 Every string kept goes through ``Scrubber``: the values of known secrets (``.env`` files near the work, and
 environment variables whose names say KEY, TOKEN, SECRET, PASSWORD...) are replaced by ``[REDACTED:<NAME>]``, then
@@ -272,12 +278,158 @@ def _codex_record(ev: dict, scrub: Scrubber, counts: Counter) -> Optional[dict]:
             "payload": {"type": item, **{k: scrub.deep(p[k]) for k in fields if k in p}}}
 
 
+# ------------------------------------------------------------------ Pi
+def _pi_content(content, scrub: Scrubber, counts: Counter, role: str):
+    if isinstance(content, str):
+        text = _text(content, counts)
+        return scrub(text) if (role == "toolResult" or text.strip()) else ""
+    out = []
+    for b in content if isinstance(content, list) else []:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if bt == "text":
+            t = _text(b.get("text", ""), counts)
+            if role == "toolResult" or t.strip():
+                out.append({"type": "text", "text": scrub(t)})
+        elif bt == "toolCall" and role == "assistant":
+            out.append({"type": "toolCall", "id": b.get("id"), "name": b.get("name"),
+                        "arguments": scrub.deep(b.get("arguments") or {})})
+        else:
+            counts[f"dropped {role} {bt} blocks"] += 1
+    return out
+
+
+def _pi_record(ev: dict, scrub: Scrubber, counts: Counter) -> Optional[dict]:
+    kind = ev.get("type")
+    if kind == "session":
+        keep = {k: ev[k] for k in ("type", "version", "id", "timestamp") if k in ev}
+        return {**keep, **({"cwd": scrub(ev["cwd"])} if isinstance(ev.get("cwd"), str) else {})}
+    if kind in ("compaction", "branch_summary"):
+        keys = ("type", "id", "parentId", "timestamp", "firstKeptEntryId", "fromId")
+        return {**{k: ev[k] for k in keys if k in ev}, "summary": scrub(_text(str(ev.get("summary", "")), counts))}
+    if kind != "message":
+        counts[f"dropped {kind} records"] += 1
+        return None
+    msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+    role = msg.get("role")
+    head = {k: ev[k] for k in ("type", "id", "parentId", "timestamp") if k in ev}
+    if role in ("user", "assistant"):
+        content = _pi_content(msg.get("content"), scrub, counts, role)
+        if not content:
+            counts[f"dropped empty {role} records"] += 1
+            return None
+        return {**head, "message": {"role": role, "content": content}}
+    if role == "toolResult":
+        return {**head, "message": {"role": "toolResult", "toolCallId": msg.get("toolCallId"),
+                                    "toolName": msg.get("toolName"),
+                                    "content": _pi_content(msg.get("content"), scrub, counts, role),
+                                    **({"isError": True} if msg.get("isError") else {})}}
+    if role == "bashExecution":
+        if msg.get("excludeFromContext"):
+            counts["dropped excluded bashExecution records"] += 1
+            return None
+        return {**head, "message": {"role": "bashExecution", "command": scrub(str(msg.get("command", ""))),
+                                    "output": scrub(_text(str(msg.get("output", "")), counts)),
+                                    **({"exitCode": msg["exitCode"]} if "exitCode" in msg else {})}}
+    counts[f"dropped {role} messages"] += 1
+    return None
+
+
+# ------------------------------------------------------------------ Antigravity
+ANTIGRAVITY_INJECTED = re.compile(
+    r"\s*<(?P<tag>ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|EPHEMERAL_MESSAGE|SYSTEM_MESSAGE)>.*?"
+    r"</(?P=tag)>\s*",
+    re.S,
+)
+ANTIGRAVITY_USER_REQ = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
+ANTIGRAVITY_DROP_STEPS = frozenset({
+    "CONVERSATION_HISTORY", "CHECKPOINT", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE", "MEMORY", "PLANNING",
+})
+ANTIGRAVITY_TOOL_STEPS = frozenset({
+    "TOOL_RESULT", "TOOL_RESPONSE", "RUN_COMMAND", "COMMAND_STATUS", "VIEW_FILE", "VIEW_FILE_OUTLINE",
+    "VIEW_CODE_ITEM", "LIST_DIRECTORY", "GREP_SEARCH", "FIND_BY_NAME", "CODE_ACTION",
+    "REPLACE_FILE_CONTENT", "MULTI_REPLACE_FILE_CONTENT", "WRITE_TO_FILE", "SEARCH_WEB",
+    "READ_URL_CONTENT", "BROWSER_SUBAGENT", "MCP_TOOL",
+})
+
+
+def _antigravity_user_text(s: str, counts: Counter) -> str:
+    out, n = ANTIGRAVITY_INJECTED.subn(" ", s)
+    if n:
+        counts["dropped injected context blocks"] += n
+    reqs = ANTIGRAVITY_USER_REQ.findall(out)
+    if reqs:
+        stripped = ANTIGRAVITY_USER_REQ.sub("", out).strip()
+        if stripped:
+            counts["dropped injected context blocks"] += 1
+        out = "\n\n".join(r.strip() for r in reqs if r.strip())
+    return _text(out, counts).strip()
+
+
+def _antigravity_record(ev: dict, scrub: Scrubber, counts: Counter) -> Optional[dict]:
+    kind = ev.get("type")
+    if ev.get("source") == "SYSTEM" or kind in ANTIGRAVITY_DROP_STEPS:
+        counts[f"dropped {kind} records"] += 1
+        return None
+    if ev.get("media"):
+        counts["dropped media attachments"] += len(ev["media"]) if isinstance(ev["media"], list) else 1
+    if kind == "USER_INPUT":
+        raw = ev.get("content") if isinstance(ev.get("content"), str) else ""
+        cleaned = scrub(_antigravity_user_text(raw, counts))
+        if not cleaned.strip():
+            counts["dropped empty USER_INPUT records"] += 1
+            return None
+        return {**{k: ev[k] for k in ("step_index", "type", "created_at") if k in ev}, "content": cleaned}
+    if kind == "PLANNER_RESPONSE":
+        if ev.get("thinking"):
+            counts["dropped assistant thinking blocks"] += 1
+        raw = ev.get("content") if isinstance(ev.get("content"), str) else ""
+        content = scrub(_text(raw, counts)).strip()
+        calls = []
+        for tc in ev.get("tool_calls") or []:
+            if isinstance(tc, dict):
+                args = tc.get("args") if "args" in tc else (tc.get("parameters") or tc.get("input") or {})
+                entry = {"name": tc.get("name"), "args": scrub.deep(args)}
+                if "id" in tc:
+                    entry["id"] = tc["id"]
+                if "output" in tc:
+                    entry["output"] = scrub.deep(tc["output"])
+                calls.append(entry)
+        if not content and not calls:
+            counts["dropped empty PLANNER_RESPONSE records"] += 1
+            return None
+        keep = {k: ev[k] for k in ("step_index", "type", "created_at") if k in ev}
+        if content:
+            keep["content"] = content
+        if calls:
+            keep["tool_calls"] = calls
+        return keep
+    if kind in ANTIGRAVITY_TOOL_STEPS:
+        keep = {k: ev[k] for k in ("step_index", "type", "status", "created_at") if k in ev}
+        for field in ("content", "output"):
+            if field in ev and ev[field] is not None:
+                val = ev[field]
+                keep[field] = scrub(_text(val, counts)) if isinstance(val, str) else scrub.deep(val)
+        return keep
+    counts[f"dropped {kind} records"] += 1
+    return None
+
+
+_RECORDS = {
+    "claude": _claude_record,
+    "codex": _codex_record,
+    "pi": _pi_record,
+    "antigravity": _antigravity_record,
+}
+
+
 # ------------------------------------------------------------------ files
 def sanitize_session(src: Path, dest: Path, agent: str, secrets: dict[str, str]) -> Counter:
-    """Write the shareable copy of session ``src`` (agent ``claude`` or ``codex``) to ``dest``; return what was
-    dropped and redacted, as counts."""
+    """Write the shareable copy of session ``src`` (``claude``, ``codex``, ``pi`` or ``antigravity``) to ``dest``;
+    return what was dropped and redacted, as counts."""
     scrub, counts = Scrubber(secrets), Counter()
-    record = _claude_record if agent == "claude" else _codex_record
+    record = _RECORDS.get(agent, _codex_record)
     kept = 0
     dest.parent.mkdir(parents=True, exist_ok=True)
     with src.open(encoding="utf-8", errors="replace") as fin, dest.open("w", encoding="utf-8") as fout:

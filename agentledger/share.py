@@ -63,7 +63,7 @@ def _home_pattern() -> Optional[re.Pattern]:
 
 
 def _session_kind(path: Path) -> Optional[str]:
-    """``claude`` or ``codex`` when a (plain) trace is an agent session transcript, else None."""
+    """``claude``, ``codex``, ``pi`` or ``antigravity`` when a (plain) trace is an agent session transcript, else None."""
     with path.open(encoding="utf-8", errors="replace") as fh:
         for _, line in zip(range(50), fh):
             try:
@@ -77,6 +77,12 @@ def _session_kind(path: Path) -> Optional[str]:
             if "sessionId" in ev and (ev.get("type") in ("user", "assistant", "summary", "system", "session-owner")
                                       or isinstance(ev.get("message"), dict)):
                 return "claude"
+            if ev.get("type") == "session" and "id" in ev and ("version" in ev or "cwd" in ev):
+                return "pi"
+            if "step_index" in ev and (ev.get("type") in redact.ANTIGRAVITY_DROP_STEPS
+                                       or ev.get("type") in redact.ANTIGRAVITY_TOOL_STEPS
+                                       or ev.get("type") in ("USER_INPUT", "PLANNER_RESPONSE")):
+                return "antigravity"
     return None
 
 
