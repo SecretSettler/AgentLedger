@@ -873,6 +873,10 @@
         note.textContent = `Lines ${span.lo}–${span.hi} of ${all.length}.`;
         if (e.start && e.start > all.length) note.textContent = `The trace has ${all.length} lines; this citation starts at line ${e.start}.`;
         if (batch) note.textContent += ' A verified copy fetched on this machine.';
+        if (span.lo <= 1 && span.hi >= all.length) {  // everything is shown: nothing more to load
+          const btn = [...document.querySelectorAll('.al-modal-actions button')].find((x) => x.textContent === 'More context');
+          if (btn) btn.hidden = true;
+        }
       } catch (err) { if (batch) notFetched(); else note.textContent = err.message; }
     };
     const body = h('div.al-trace', null,
@@ -880,7 +884,8 @@
       batch ? h('div.al-trace-batch', null, 'In the trace store: ',
         batch.release_url ? h('a', { href: batch.release_url, target: '_blank', rel: 'noopener noreferrer' }, `${batch.repo}@${batch.tag}`) : `${batch.repo}@${batch.tag}`,
         ` · run ${batch.run} · SHA256 ${batch.sha256.slice(0, 12)}… · ${batch.size.toLocaleString()} bytes`) : null,
-      e.error ? h('p.al-trace-error', null, `This citation does not resolve: ${e.error}.`) : null,
+      e.omitted ? h('p.al-muted', null, `${e.error[0].toUpperCase()}${e.error.slice(1)}.`)
+        : e.error ? h('p.al-trace-error', null, `This citation does not resolve: ${e.error}.`) : null,
       e.error && !e.href ? null : box, note,
       e.href ? h('a.al-trace-dl', { href: e.href, download: '' }, AL.iconEl('download'), 'Download the trace') : null);
     if (e.lines) draw(e.lines);
@@ -919,7 +924,7 @@
   function setupTraces() {
     $$('a[data-tref]', article).forEach((a) => {
       const e = TRACES.refs[a.dataset.tref];
-      if (e) a.title = e.error ? `${e.ref}: ${e.error}` : `${e.ref} · ${linesLabel(e)} of ${e.name} (v${e.version}): click to see them`;
+      if (e) a.title = e.omitted ? `${e.ref}: ${e.error}` : e.error ? `${e.ref}: ${e.error}` : `${e.ref} · ${linesLabel(e)} of ${e.name} (v${e.version}): click to see them`;
     });
     document.addEventListener('click', (ev) => {
       const a = ev.target.closest('a[data-tref], a[data-tref-live], code.al-tname');

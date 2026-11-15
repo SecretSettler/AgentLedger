@@ -477,10 +477,38 @@ class TraceCitationTests(unittest.TestCase):
         self.assertIn("no trace named nope.txt", by_ref["trace:nope.txt#L1"]["error"])
         self.assertIn('data-tref-error="1">too far</a>', page)
         files = {f["name"]: f for f in page_data(page)["traces"]["files"]}
-        self.assertEqual(files["run.log"]["cited"], 3)
+        self.assertEqual(files["run.log"]["cited"], 2)             # the out-of-range one is not counted
         self.assertIn("trace:run.log</code>", page)                                                 # footer: cite it as
         from agentledger import tracerefs
         self.assertEqual(len(tracerefs.check(self.store, v.report, v)), 2)
+
+    def test_errors_keep_their_lines_and_do_not_count_as_citations(self):
+        v = self.publish(traces=[self.log])
+        build(self.store)
+        page = (v.path / "index.html").read_text()
+        refs = {e["ref"]: e for e in page_data(page)["traces"]["refs"].values()}
+        bad = refs["trace:run.log#L900"]
+        self.assertEqual((bad["start"], bad["end"]), (900, 900))              # the panel title says line 900, not "whole file"
+        self.assertEqual(refs["trace:nope.txt#L1"]["start"], 1)
+        files = {f["name"]: f for f in page_data(page)["traces"]["files"]}
+        self.assertEqual(files["run.log"]["cited"], 2)                          # the L900 one is not a citation of run.log
+        self.assertIn("cited 2×", page)
+
+    def test_shared_without_traces_says_so_instead_of_blaming_the_citation(self):
+        from agentledger import share
+        v = self.publish(traces=[self.log])
+        bundle = self.tmp / "lean.agentledger.zip"
+        share.pack(self.store, "p/r", bundle, traces=False)
+        reader, _ = share.unpack(bundle, self.tmp / "reader")
+        page = (reader.report("p/r").latest.path / "index.html").read_text()
+        refs = {e["ref"]: e for e in page_data(page)["traces"]["refs"].values()}
+        e = refs["trace:run.log#L51"]
+        self.assertTrue(e["omitted"])
+        self.assertIn("does not include the traces", e["error"])
+        self.assertIn('data-tref-omitted="1"', page)
+        self.assertNotIn("no trace named run.log", page)
+        from agentledger import tracerefs
+        self.assertEqual(tracerefs.check(reader, reader.report("p/r"), reader.report("p/r").latest), [])
 
     def test_later_versions_and_named_versions(self):
         self.publish(traces=[self.log])

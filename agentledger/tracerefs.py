@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import gzip
 import html as htmlmod
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,17 +145,21 @@ class Linker:
         ref = parse(raw)
         if ref is None:
             return {"ref": "trace:" + raw, "error": "not a trace citation: write trace:<file>#L<first>-L<last>"}
+        base = {"ref": ref.text(), "name": ref.name, "start": ref.start, "end": ref.end}
         found = resolve(self.report, self.v, ref)
         if not found:
             try:
                 hit = tracebatch.resolve(self.report, self.v, ref.name, ref.version)
             except tracebatch.BatchError as exc:
-                return {"ref": ref.text(), "name": ref.name, "error": str(exc)}
+                return {**base, "error": str(exc)}
             if hit:
                 return self.batch_entry(ref, hit)
+            if self.traces_left_out():
+                return {**base, "omitted": True,
+                        "error": "this shared copy does not include the traces (shared with --no-traces)"}
             where = f"in v{ref.version}" if ref.version else f"in v{self.v.number} or an earlier version"
             batches = " or its trace-store batches" if any(tracebatch.indexes(x) for x in self.report.versions) else ""
-            return {"ref": ref.text(), "name": ref.name, "error": f"no trace named {ref.name} {where}{batches}"}
+            return {**base, "error": f"no trace named {ref.name} {where}{batches}"}
         x, t, path = found
         out = {"ref": ref.text(), "name": trace_name(t), "version": x.number, "start": ref.start, "end": ref.end,
                "href": self.href_for(path), "path": self.store.repo_path(path), "bytes": t.get("bytes", 0)}
@@ -166,9 +171,18 @@ class Linker:
             if size <= self.budget:
                 out["lines"] = got["lines"]
                 self.budget -= size
-        key = str(path)
-        self.cited[key] = self.cited.get(key, 0) + 1
+        if "error" not in out:  # a citation that does not resolve is not a citation of this trace
+            key = str(path)
+            self.cited[key] = self.cited.get(key, 0) + 1
         return out
+
+    def traces_left_out(self) -> bool:
+        """A bundle made with `share --no-traces`: its citations point at traces that were left out on purpose."""
+        try:
+            marker = json.loads((Path(self.store.root) / "agentledger-share.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return marker.get("traces") is False
 
     def batch_entry(self, ref: Ref, hit) -> dict:
         """A citation into a trace-store batch: where the file is and how to get it; its lines are never put in the
@@ -193,12 +207,13 @@ class Linker:
             if rid is None:
                 rid = self._ids[raw] = f"tr{len(self._ids) + 1}"
                 self.refs[rid] = self.entry(raw)
-            bad = ' data-tref-error="1"' if "error" in self.refs[rid] else ""
+            e = self.refs[rid]
+            bad = ' data-tref-omitted="1"' if e.get("omitted") else ' data-tref-error="1"' if "error" in e else ""
             return f'href="#{rid}" data-tref="{rid}"{bad}'
         return HREF_RE.sub(sub, html)
 
     def problems(self) -> list[str]:
-        return [f"{e['ref']}: {e['error']}" for e in self.refs.values() if "error" in e] + self.extra
+        return [f"{e['ref']}: {e['error']}" for e in self.refs.values() if "error" in e and not e.get("omitted")] + self.extra
 
 
 def check(store, report, v) -> list[str]:
