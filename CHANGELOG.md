@@ -2,13 +2,21 @@
 
 ## Unreleased
 
+- **Pi and Antigravity support.** `agentledger setup` now installs the `agentledger` skill for **Pi**
+  (`$PI_CODING_AGENT_DIR/skills` or `~/.pi/agent/skills`) and **Antigravity** (`$ANTIGRAVITY_HOME/config/skills` or
+  `~/.gemini/config/skills`) alongside Claude Code and Codex, with `--agent claude|codex|pi|antigravity|all` to install
+  for selected harnesses only. `publish --link-session`, `trace prepare`, `trace approve` and `share` recognise and
+  sanitise Pi and Antigravity transcripts; `ask`, `open`/`serve`/`demo --ask` and `trace review --agent` run `pi`
+  (forking the author session via `--fork` and running offline with read-only tools) and `agy` (resuming via
+  `--conversation` in `--sandbox` stream-json mode), while denying access to `.pi` and `.gemini` credentials and
+  session stores.
 - **Follow-up questions in the thread.** Once the agent has answered, a box under the answer takes the next
   question: Enter asks (Shift+Enter for a new line, IME composition is left alone), **Reply only** saves without
   asking. The text being typed survives the panel refreshing, and the cursor returns to the box when the answer
   arrives.
 - **No credentials in a shared report.** `agentledger share` redacts every file it packs (report, data, traces,
   threads) as `trace prepare` does: secrets known on this machine and common credential formats become
-  `[REDACTED:<name>]`, the home directory `~`, and a raw Claude Code or Codex transcript is cut down to the
+  `[REDACTED:<name>]`, the home directory `~`, and a raw Claude Code, Codex, Pi or Antigravity transcript is cut down to the
   conversation. The built bundle is scanned again and not written if anything is left (a binary file holding a
   credential stops the share). Your store is unchanged; `share` lists what it redacted, per file.
 - **Reproduce a shared report.** `agentledger open` prints the repository and commit the report describes with the

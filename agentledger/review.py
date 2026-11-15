@@ -90,7 +90,7 @@ def _policy(store: Store, kind: str, folder: Path) -> tuple[Optional[sandbox.Pol
             return pol, True
     if kind == "claude":  # no sandbox: no Bash, but the Edit tool, limited to the folder, still works
         return sandbox.Policy(None, [], secrets, writes=[folder.resolve()]), True
-    return None, False    # Codex in its plain read-only sandbox: it can only say what to change
+    return None, False    # Codex without verified sandbox, Pi, or Antigravity: read-only, lists what to change
 
 
 def _valid_jsonl(path: Path) -> Optional[int]:
@@ -107,7 +107,7 @@ def _valid_jsonl(path: Path) -> Optional[int]:
 
 def review_trace(store: Store, report_id: str, backend: Backend, timeout: float = 1800,
                  on_progress: Callable[[str], None] = lambda s: None) -> dict:
-    """Run ``backend`` (claude or codex) over the prepared copy of ``report_id``; return what happened."""
+    """Run ``backend`` over the prepared copy of ``report_id``; return what happened."""
     state = load_trace_state(store.root, report_id)
     if not state or not Path(state["path"]).is_file():
         raise AskError(f"no prepared trace for {report_id}: run `agentledger trace prepare {report_id} "

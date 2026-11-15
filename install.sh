@@ -5,7 +5,8 @@
 #
 # 1. installs the `agentledger` CLI (pipx, else uv, else pip --user)
 # 2. runs `agentledger setup`: links your private store (or creates ~/agentledger-store)
-#    and installs the skill for Claude Code (~/.claude/skills) and Codex (~/.agents/skills)
+#    and installs the skill for Claude Code (~/.claude/skills), Codex (~/.agents/skills),
+#    Pi (~/.pi/agent/skills) and Antigravity (~/.gemini/config/skills)
 #
 # Use an existing clone of your store:   ... | sh -s -- ~/path/to/your-store
 set -eu
@@ -36,8 +37,8 @@ if ! command -v agentledger >/dev/null 2>&1; then
     [ -x "$d/agentledger" ] && BIN="$d/agentledger" && break
   done
   [ "$BIN" = agentledger ] && die "installed, but agentledger is not on PATH; add ~/.local/bin to PATH and run: agentledger setup"
-  say "Note: add $(dirname "$BIN") to your PATH so Claude Code and Codex can run agentledger"
+  say "Note: add $(dirname "$BIN") to your PATH so Claude Code, Codex, Pi and Antigravity can run agentledger"
 fi
 
-say "Setting up your store and the Claude Code / Codex skill"
+say "Setting up your store and the skill for Claude Code, Codex, Pi and Antigravity"
 "$BIN" setup "$@"
