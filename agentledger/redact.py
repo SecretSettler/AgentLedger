@@ -425,9 +425,10 @@ _RECORDS = {
 
 
 # ------------------------------------------------------------------ files
-def sanitize_session(src: Path, dest: Path, agent: str, secrets: dict[str, str]) -> Counter:
+def sanitize_session(src: Path, dest: Path, agent: str, secrets: dict[str, str], keep_lines: bool = False) -> Counter:
     """Write the shareable copy of session ``src`` (``claude``, ``codex``, ``pi`` or ``antigravity``) to ``dest``;
-    return what was dropped and redacted, as counts."""
+    return what was dropped and redacted, as counts.  ``keep_lines`` writes ``{"dropped": true}`` for each record
+    left out, so line numbers (what ``trace:`` citations point at) stay those of ``src``."""
     scrub, counts = Scrubber(secrets), Counter()
     record = _RECORDS.get(agent, _codex_record)
     kept = 0
@@ -438,11 +439,15 @@ def sanitize_session(src: Path, dest: Path, agent: str, secrets: dict[str, str])
                 ev = json.loads(line)
             except ValueError:
                 counts["dropped unreadable lines"] += 1
+                if keep_lines:
+                    fout.write('{"dropped": true}\n')
                 continue
             out = record(ev, scrub, counts) if isinstance(ev, dict) else None
             if out is not None:
                 fout.write(json.dumps(out, ensure_ascii=False) + "\n")
                 kept += 1
+            elif keep_lines:
+                fout.write('{"dropped": true}\n')
     counts["kept records"] = kept
     counts.update(scrub.counts)
     counts.update({f"to review: {k}": n for k, n in scrub.hints.items()})

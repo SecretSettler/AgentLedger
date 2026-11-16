@@ -42,6 +42,7 @@ def create(target: Path) -> Store:
     store.reply("c_demo1", "Investigating: the harness re-emits the full C source on every call, which the recorded "
                 "agent never does.", author="claude-code")
     store.publish("demo/benchmark", DATA / "benchmark-v2.md", author="claude-code", resolves=["c_demo1", "c_demo2"],
+                  traces=[DATA / "harness-run.log"],
                   changes="Explained the output-token gap (new subsection under Results) and re-tokenized the recorded logs.")
     store.reply("c_demo1", "Fixed in v2: see *Why harness output tokens run higher* under Results. Excluding re-emitted "
                 "source, harness output is 48,310 tokens, below the recorded 177,399.", author="claude-code")
